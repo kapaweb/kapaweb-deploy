@@ -1,0 +1,6 @@
+{
+  "name": "kapaweb-deploy",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module"
+}
