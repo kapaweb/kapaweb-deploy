@@ -1,0 +1,12 @@
+{
+  "name": "kapaweb-deploy",
+  "displayName": "kapaweb deploy",
+  "description": "Deploy websites, PHP apps and WordPress to kapaweb DirectAdmin hosting from a conversation, without your hosting password ever entering the chat. Includes the kapaweb connector, a local MCP server.",
+  "author": {
+    "name": "Kapaweb",
+    "url": "https://kapaweb.gr"
+  },
+  "homepage": "https://kapaweb.gr/deploy-with-ai/",
+  "license": "MIT",
+  "version": "0.7.0"
+}
