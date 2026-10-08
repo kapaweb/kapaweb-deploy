@@ -33,6 +33,17 @@ Kapaweb (<https://kapaweb.gr>, <info@kapaweb.gr>) provides this plugin.
 - **Children:** this is a business tool and is not intended for people under 18.
 - **Contact:** <info@kapaweb.gr>.
 
+## Notes for reviewers
+
+The directory scan holds this plugin for review because its heuristics see "a credential" near "a remote host". What each finding points at (all checked in the source):
+
+- `server/da.js`: `ssd5.kdns.gr` appears only in a code comment (the example shape of a panel address). The panel address the user typed is checked against kapaweb's own server list (`verifyPanelHost`) and the connection is pinned to the verified IP address before the login key is ever sent.
+- `server/setup.js`: `${h}` is a JavaScript template literal in the Origin check of the local sign-in page (`http://127.0.0.1:<random port>`); it is not a host and no secret is sent to it.
+- `server/tools.js`: `kapaweb.gr` is a comment and the public playbook URL. That request carries only the header `User-Agent: kapaweb-connector` (no key, no password).
+- `server/clients.js`: this file builds help text for the user and mentions the path `~/.claude.json` inside that text. It reads no file and sends nothing.
+
+The only credential the plugin handles is the restricted DirectAdmin login key of the user's own hosting account. It is created from a password typed once on the local sign-in page, kept in the operating system's protected storage, and sent only to that user's own verified kapaweb panel. The plugin does not read any other credential, environment token or file from the user's computer.
+
 ## License
 
 MIT. See the `LICENSE` file.
