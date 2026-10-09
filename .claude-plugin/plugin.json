@@ -8,5 +8,8 @@
   },
   "homepage": "https://kapaweb.gr/deploy-with-ai/",
   "license": "MIT",
+  "repository": "https://github.com/kapaweb/kapaweb-deploy",
+  "privacyPolicyUrl": "https://github.com/kapaweb/kapaweb-deploy#privacy-policy",
+  "supportUrl": "https://kapaweb.gr/contact/",
   "version": "0.7.0"
 }
