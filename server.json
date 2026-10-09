@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kapaweb/kapaweb-deploy",
+  "title": "kapaweb deploy",
+  "description": "Deploy websites, PHP apps and WordPress to kapaweb DirectAdmin hosting without sharing your password",
+  "repository": {
+    "url": "https://github.com/kapaweb/kapaweb-deploy",
+    "source": "github"
+  },
+  "version": "0.7.0",
+  "websiteUrl": "https://kapaweb.gr/deploy-with-ai/",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/kapaweb/kapaweb-deploy/releases/download/v0.7.0/kapaweb-connector.mcpb",
+      "fileSha256": "0bef99235018be7f6e5060735232a8c58b6b57d0be1ef9978baa8f089a1786bc",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "kapaweb-deploy",
+  "description": "Deploy websites, PHP apps and WordPress to kapaweb DirectAdmin hosting from a conversation, without your hosting password ever entering the chat. Includes the kapaweb connector, a local MCP server.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "kapaweb": {
+      "command": "node",
+      "args": [
+        "${extensionPath}${/}server${/}index.js"
+      ],
+      "cwd": "${extensionPath}"
+    }
+  },
+  "version": "0.7.0"
+}
