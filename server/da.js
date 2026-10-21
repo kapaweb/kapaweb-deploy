@@ -511,5 +511,11 @@ export function describeError(err) {
     if (err.status === 404) return `Not found${r}: ${err.message}`;
     return `${err.message}${r}`;
   }
+  if (err?.name === 'PleskError') {
+    // (checked by name: plesk.js imports this file)
+    if (err.code === 'FORBIDDEN') return `Plesk does not allow this for the login's hosting plan or role. Do not look for a workaround; tell the user, or ask kapaweb support. ${err.message}`;
+    if (err.code === 'AUTH') return err.message;
+    return `Plesk: ${redactor.text(err.message)}${err.operation ? ` (${err.operation})` : ''}`;
+  }
   return `Unexpected error: ${redactor.text(err?.message || String(err))}`;
 }

@@ -1,7 +1,7 @@
 // Shared helpers: errors, random secrets, redaction, small validators.
 import { randomBytes, randomInt } from 'node:crypto';
 
-export const VERSION = '0.7.0';
+export const VERSION = '0.8.0';
 export const PLAYBOOK_URL = 'https://kapaweb.gr/deploy-with-ai/playbook.md';
 
 /** An error whose message is meant to be read by the AI (and the user) verbatim. */

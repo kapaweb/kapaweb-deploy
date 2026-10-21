@@ -14,9 +14,9 @@ export const LIFETIME_MS = 15 * 60 * 1000; // how long the page waits for the us
 const STRINGS = {
   en: {
     title: 'Connect kapaweb hosting',
-    lead: 'Type your hosting details once. The password is used only to create a restricted key and is then forgotten; your AI app never sees it.',
-    address: 'DirectAdmin address',
-    addressHelp: 'From your welcome e-mail, for example server1.kdns.gr',
+    lead: 'Type your hosting details once. The password is used only to create a key and is then forgotten; your AI app never sees it.',
+    address: 'Hosting panel address',
+    addressHelp: 'DirectAdmin or Plesk. From your welcome e-mail, for example server1.kdns.gr',
     username: 'Username',
     password: 'Password',
     otp: 'Two-step code (only if you use one)',
@@ -25,12 +25,15 @@ const STRINGS = {
     e90: '90 days',
     e365: '1 year',
     enever: 'Until I remove it (not recommended)',
-    iplock: 'Lock the key to this computer\'s internet address (safer, but you must reconnect if your address changes)',
+    iplock: 'Lock the key to this computer\'s internet address (DirectAdmin only; safer, but you must reconnect if your address changes)',
     submit: 'Connect',
     working: 'Connecting… this takes a few seconds.',
     doneTitle: 'Connected',
     doneText: 'You can close this tab and go back to your AI app. It can now work on your hosting account.',
-    what: 'The key can manage files, databases, PHP settings, logs, SSL, subdomains and cron jobs of this account. It cannot open the control panel, change your password or create other keys. You can remove it any time in DirectAdmin under Login Keys.',
+    what: 'DirectAdmin: the key can manage files, databases, PHP settings, logs, SSL, subdomains and cron jobs of this account. It cannot open the control panel, change your password or create other keys. You can remove it any time in DirectAdmin under Login Keys.',
+    whatPleskPw: 'Plesk: Plesk gave no way to create a limited key, so the connector keeps your Plesk password in this computer\'s protected storage and uses it for every request. It has the same access as you have in Plesk, including changing your password. Ask your AI app to disconnect (or use the disconnect tool) to make it forget the password.',
+    noticePlesk: 'Using Plesk? Plesk does not let a customer create a limited key, so the connector keeps your Plesk password in this computer\'s protected storage and uses it for every request. It then has the same access as you have in Plesk, including changing your password. You can make it forget the password any time (disconnect). With DirectAdmin nothing like that happens: only a restricted key is kept.',
+    whatPlesk: 'Plesk: Plesk cannot restrict a key, so the key has the same rights as your Plesk login (without the password). It is kept only in this computer\'s protected storage, and Plesk support in this connector is still being completed. You can remove it any time: the disconnect tool deletes it in Plesk, or delete it there yourself.',
     failTitle: 'Could not connect',
     again: 'Try again',
     tooMany: 'Too many attempts. Go back to your AI app and ask it to start the connection again.',
@@ -41,9 +44,9 @@ const STRINGS = {
   },
   el: {
     title: 'Σύνδεση με το hosting της kapaweb',
-    lead: 'Γράψε τα στοιχεία του hosting σου μία φορά. Ο κωδικός χρησιμοποιείται μόνο για να δημιουργηθεί ένα περιορισμένο κλειδί και μετά ξεχνιέται· το AI app δεν τον βλέπει ποτέ.',
-    address: 'Διεύθυνση DirectAdmin',
-    addressHelp: 'Από το email καλωσορίσματος, π.χ. server1.kdns.gr',
+    lead: 'Γράψε τα στοιχεία του hosting σου μία φορά. Ο κωδικός χρησιμοποιείται μόνο για να δημιουργηθεί ένα κλειδί και μετά ξεχνιέται· το AI app δεν τον βλέπει ποτέ.',
+    address: 'Διεύθυνση panel του hosting',
+    addressHelp: 'DirectAdmin ή Plesk. Από το email καλωσορίσματος, π.χ. server1.kdns.gr',
     username: 'Όνομα χρήστη',
     password: 'Κωδικός',
     otp: 'Κωδικός δύο βημάτων (μόνο αν τον χρησιμοποιείς)',
@@ -52,12 +55,15 @@ const STRINGS = {
     e90: '90 ημέρες',
     e365: '1 χρόνο',
     enever: 'Μέχρι να το αφαιρέσω (δεν προτείνεται)',
-    iplock: 'Δέσε το κλειδί στη διεύθυνση internet αυτού του υπολογιστή (πιο ασφαλές, αλλά θα ξανασυνδεθείς αν αλλάξει η διεύθυνση)',
+    iplock: 'Δέσε το κλειδί στη διεύθυνση internet αυτού του υπολογιστή (μόνο για DirectAdmin· πιο ασφαλές, αλλά θα ξανασυνδεθείς αν αλλάξει η διεύθυνση)',
     submit: 'Σύνδεση',
     working: 'Γίνεται σύνδεση… θα πάρει λίγα δευτερόλεπτα.',
     doneTitle: 'Συνδέθηκε',
     doneText: 'Μπορείς να κλείσεις αυτή την καρτέλα και να γυρίσεις στο AI app σου. Πλέον μπορεί να δουλέψει στον λογαριασμό hosting σου.',
-    what: 'Το κλειδί διαχειρίζεται αρχεία, βάσεις, ρυθμίσεις PHP, logs, SSL, subdomains και cron jobs αυτού του λογαριασμού. Δεν ανοίγει το panel, δεν αλλάζει τον κωδικό σου και δεν δημιουργεί άλλα κλειδιά. Μπορείς να το αφαιρέσεις όποτε θες από το DirectAdmin, στα Login Keys.',
+    what: 'DirectAdmin: το κλειδί διαχειρίζεται αρχεία, βάσεις, ρυθμίσεις PHP, logs, SSL, subdomains και cron jobs αυτού του λογαριασμού. Δεν ανοίγει το panel, δεν αλλάζει τον κωδικό σου και δεν δημιουργεί άλλα κλειδιά. Μπορείς να το αφαιρέσεις όποτε θες από το DirectAdmin, στα Login Keys.',
+    whatPleskPw: 'Plesk: το Plesk δεν έδωσε τρόπο να δημιουργηθεί περιορισμένο κλειδί, οπότε ο connector κρατά τον κωδικό σου του Plesk στην προστατευμένη αποθήκη αυτού του υπολογιστή και τον χρησιμοποιεί σε κάθε αίτημα. Έχει την ίδια πρόσβαση με εσένα στο Plesk, και αλλαγή του κωδικού σου. Ζήτα από το AI app σου disconnect (ή χρησιμοποίησε το εργαλείο disconnect) για να ξεχάσει τον κωδικό.',
+    noticePlesk: 'Χρησιμοποιείς Plesk; Το Plesk δεν αφήνει τον πελάτη να δημιουργήσει περιορισμένο κλειδί, οπότε ο connector κρατά τον κωδικό σου του Plesk στην προστατευμένη αποθήκη αυτού του υπολογιστή και τον χρησιμοποιεί σε κάθε αίτημα. Έχει τότε την ίδια πρόσβαση με εσένα στο Plesk, και αλλαγή του κωδικού σου. Μπορείς να τον κάνεις να ξεχάσει τον κωδικό όποτε θέλεις (disconnect). Στο DirectAdmin δεν γίνεται κάτι τέτοιο: κρατιέται μόνο ένα περιορισμένο κλειδί.',
+    whatPlesk: 'Plesk: το Plesk δεν μπορεί να περιορίσει ένα κλειδί, οπότε το κλειδί έχει τα ίδια δικαιώματα με τη σύνδεσή σου στο Plesk (χωρίς τον κωδικό). Φυλάσσεται μόνο στην προστατευμένη αποθήκευση αυτού του υπολογιστή και η υποστήριξη Plesk στον connector ολοκληρώνεται ακόμη. Μπορείς να το αφαιρέσεις όποτε θες: το εργαλείο disconnect το διαγράφει στο Plesk, ή διαγράψ’ το εσύ εκεί.',
     failTitle: 'Η σύνδεση δεν έγινε',
     again: 'Δοκίμασε ξανά',
     tooMany: 'Πάρα πολλές προσπάθειες. Γύρνα στο AI app σου και ζήτησέ του να ξεκινήσει ξανά τη σύνδεση.',
@@ -92,7 +98,7 @@ label{display:block;font-weight:600;margin:16px 0 4px}input[type=text],input[typ
 .check{display:flex;gap:10px;align-items:flex-start;margin-top:16px;font-weight:400}.check input{margin-top:4px}
 button{margin-top:22px;width:100%;padding:12px;border:0;border-radius:10px;background:#f7931e;color:#1a1a1a;font:inherit;font-weight:700;cursor:pointer}
 button[disabled]{opacity:.6;cursor:wait}
-.err{background:#fdecea;border:1px solid #f5c2c0;border-radius:8px;padding:10px 12px;margin-top:14px}.ok{background:#e8f6ec;border:1px solid #b7e1c1;border-radius:8px;padding:10px 12px}
+.notice{border:1px solid #e0b25a;background:#fff7e6;color:#3b2a05;border-radius:8px;padding:10px 12px;margin-top:16px;font-size:14px}.err{background:#fdecea;border:1px solid #f5c2c0;border-radius:8px;padding:10px 12px;margin-top:14px}.ok{background:#e8f6ec;border:1px solid #b7e1c1;border-radius:8px;padding:10px 12px}
 @media (prefers-color-scheme:dark){body{background:#12151a;color:#e8eaed}main{background:#1a1e25;border-color:#2b313a}input,select{background:#12151a!important;border-color:#3a424d!important}.muted{color:#9aa4b1}.err{background:#3a1f1f;border-color:#6b2f2f}.ok{background:#1b3324;border-color:#2f6b45}}
 `;
 
@@ -125,6 +131,7 @@ function formHtml(lang, { csrf, error, values = {}, needOtp = false }) {
       <label for="expiry">${esc(t.expiry)}</label>
       <select id="expiry" name="expiry"><option value="30"${sel('30')}>${esc(t.e30)}</option><option value="90"${sel('90')}>${esc(t.e90)}</option><option value="365"${sel('365')}>${esc(t.e365)}</option><option value="never"${sel('never')}>${esc(t.enever)}</option></select>
       <label class="check"><input type="checkbox" name="iplock" value="1"${values.iplock ? ' checked' : ''}><span>${esc(t.iplock)}</span></label>
+      <div class="notice" role="note">${esc(t.noticePlesk)}</div>
       <button type="submit">${esc(t.submit)}</button>
     </form>
     <p class="muted" style="margin-top:18px">${esc(t.what)}</p>`,
@@ -257,7 +264,7 @@ export async function startSetup({ onConnected, prefill = {}, open = true, verif
           finish({ ok: true, conn: result.conn, warning: adopted?.warning || null });
           const extra = adopted?.warning ? `<div class="err">${esc(adopted.warning)}</div>` : '';
           const who = `<p class="muted">${esc(t.account)}: ${esc(result.conn.username)} @ ${esc(result.conn.panelHost)}</p>`;
-          return send(200, page(lang, `<h1>${esc(t.doneTitle)}</h1><div class="ok">${esc(t.doneText)}</div>${who}${extra}<p class="muted">${esc(t.what)}</p>`));
+          return send(200, page(lang, `<h1>${esc(t.doneTitle)}</h1><div class="ok">${esc(t.doneText)}</div>${who}${extra}<p class="muted">${esc(result.conn.panel === 'plesk' ? (result.conn.credential === 'password' ? t.whatPleskPw : t.whatPlesk) : t.what)}</p>${(result.conn.credential === 'password' ? (result.notes || []).slice(1) : result.notes || []).filter(() => result.conn.panel === 'plesk').map((n) => `<p class="muted">${esc(n)}</p>`).join('')}`));
         }
         const message = failure instanceof UserError ? failure.message : 'Something went wrong while connecting. Please try again.';
         if (failure instanceof LockedError) {

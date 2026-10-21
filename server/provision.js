@@ -3,6 +3,8 @@
 // then dropped. Only the key is kept, and it can only run the commands below.
 import { DaClient, DaError, parsePanelAddress, verifyPanelHost } from './da.js';
 import { LockedError, checkPaused, describeWait, journal, recordRefused, recordSignedIn } from './lockout.js';
+import { choosePanel } from './panel.js';
+import { provisionPlesk } from './provision-plesk.js';
 import { UserError, randomAlnum, randomLower, redactor } from './util.js';
 
 /**
@@ -77,13 +79,36 @@ function isoNoMillis(date) {
  * @returns {Promise<{conn:object, key:string, notes:string[], adopted:any}>}
  */
 export async function provision(input) {
+  let keepsPassword = false;
   try {
-    return await exchange(input);
+    // Which panel is behind the address? (a standard port or path says so; a bare host is probed once per panel)
+    let target;
+    try {
+      target = await choosePanel(input?.address, { verifyOpts: input?.verifyOpts });
+    } catch (err) {
+      if (err instanceof UserError && /address|port/i.test(err.message) && !input?.address) journal(null, 'bad_address');
+      throw err;
+    }
+    if (target.panel === 'plesk') {
+      const result = await exchangePlesk(input, target);
+      keepsPassword = Boolean(result.keepsPassword);
+      return result;
+    }
+    return await exchange({ ...input, address: `${target.host}:${target.port}` });
   } finally {
     // The typed password is registered with the redactor only while it is in use; kept longer it would work as a
-    // guessing oracle (write a guess to a file, read the file back, look for "[redacted]").
-    if (input?.password) redactor.remove(input.password);
+    // guessing oracle (write a guess to a file, read the file back, look for "[redacted]"). The one exception: a Plesk
+    // password the customer chose to have stored IS a secret of this connector from then on, so it stays registered.
+    if (input?.password && !keepsPassword) redactor.remove(input.password);
   }
+}
+
+/** The Plesk side of provision(): see provision-plesk.js. The expiry choice is the same list as for DirectAdmin. */
+async function exchangePlesk({ username, password, expiry = 30, ipLock = false, keepPassword = true, adopt }, target) {
+  if (!password) throw new UserError('Enter the password.');
+  redactor.add(password); // if a panel message ever echoes it, it is scrubbed before it reaches the AI or a log
+  if (!Object.hasOwn(EXPIRY_CHOICES, String(expiry))) throw new UserError('Choose how long the key should last.');
+  return provisionPlesk({ host: target.host, port: target.port, pinnedIp: target.pinnedIp, username: String(username || '').trim(), password, days: EXPIRY_CHOICES[String(expiry)], ipLock, keepPassword: keepPassword !== false, adopt });
 }
 
 async function exchange({ address, username, password, otp, expiry = 30, ipLock = false, adopt, verifyOpts }) {

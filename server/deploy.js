@@ -64,7 +64,7 @@ function matcher(patterns) {
 }
 
 /** UTC timestamp that sorts lexicographically, with milliseconds so two backups never collide. */
-function stamp() {
+export function stamp() {
   return new Date().toISOString().replace(/[-:.]/g, '');
 }
 
@@ -203,11 +203,11 @@ export async function collectFiles(root, { exclude = [], forceInclude = [] } = {
 }
 
 /** Private keys and access tokens, judged by content. Samples in documentation (AWS's "...EXAMPLE" keys, a bare PEM header) do not count. */
-function looksSecret(text) {
+export function looksSecret(text) {
   return SECRET_CONTENT.some((re) => re.test(text));
 }
 
-async function buildArchives(files, emptyDirs, tmp) {
+export async function buildArchives(files, emptyDirs, tmp) {
   const parts = [];
   let cur = null;
   for (const f of files) {
@@ -311,7 +311,7 @@ async function makeBackup(da, t, existing, mode) {
 const isLeftOutOfPartial = (name) => DATA_FOLDER.test(name) || name === 'wp-content';
 
 /** Manifest entries may be forged (the AI can write that file): only clean relative file paths that are not protected count. */
-function staleFiles(listed, newSet, rootIsDocroot = true) {
+export function staleFiles(listed, newSet, rootIsDocroot = true) {
   const out = [];
   for (const f of listed) {
     if (typeof f !== 'string' || f === '' || f.length > 1024 || newSet.has(f) || (rootIsDocroot && isProtectedRel(f))) continue;

@@ -2,6 +2,8 @@
 // several), and hands out one of them for a call. `Session` is the whole set; `forAccount(...)` gives the view of ONE account
 // (`AccountSession`) that the tool handlers work with, so a handler never has to know that there are several.
 import { DaClient, verifyPanelHost } from './da.js';
+import { PleskClient } from './plesk.js';
+import { PleskWeb } from './plesk-web.js';
 import { Store } from './store.js';
 import { NotConnectedError, UserError, redactor, secretName } from './util.js';
 
@@ -19,6 +21,7 @@ export class Session {
     this.conns = []; // non-secret connection info of every connected account (each with an `id`: "username@panel")
     this.loaded = false;
     this._das = new Map(); // account id -> DaClient (one client per account keeps its own "key was rejected" latch)
+    this._webs = new Map(); // account id -> PleskWeb (a signed-in Plesk web session, kept so one login serves many calls)
     this.memoryOnly = new Set(); // ids whose key could not be stored on this computer: they live only in this process
   }
 
@@ -35,7 +38,10 @@ export class Session {
       const before = this.conns.find((c) => c.id === id);
       const now = next.find((c) => c.id === id);
       // an unchanged connection keeps its client, and with it the "key was rejected" latch
-      if (!before || !now || before.keyId !== now.keyId || before.panelHost !== now.panelHost || before.username !== now.username) this._das.delete(id);
+      if (!before || !now || before.keyId !== now.keyId || before.panelHost !== now.panelHost || before.username !== now.username) {
+        this._das.delete(id);
+        this._webs.delete(id);
+      }
     }
     this.conns = next;
     this.loaded = true;
@@ -124,7 +130,8 @@ export class Session {
     if (warning) this.memoryOnly.add(id);
     else this.memoryOnly.delete(id);
     const pinnedIp = await verifyPanelHost(conn.panelHost, this.verifyOpts); // re-checked here too: the file is only trusted after this, not before
-    this._das.set(id, new DaClient({ host: conn.panelHost, port: conn.port, username: conn.username, key, fileApi: conn.fileApi, pinnedIp }));
+    this._das.set(id, makeClient(conn, key, pinnedIp));
+    this._webs.delete(id); // a new login means a new web session
     return { warning };
   }
 
@@ -141,6 +148,7 @@ export class Session {
   async remove(id) {
     this.conns = this.conns.filter((c) => c.id !== id);
     this._das.delete(id);
+    this._webs.delete(id);
     const wasMemory = this.memoryOnly.delete(id);
     if (!wasMemory) await this.#writeFile((list) => list.filter((c) => c.id !== id));
   }
@@ -149,6 +157,15 @@ export class Session {
   async #writeFile(change) {
     await this.store.saveConnections(change(await this.store.loadConnections()));
   }
+}
+
+/** One client per account, for its panel. */
+function makeClient(conn, key, pinnedIp) {
+  if (conn.panel === 'plesk') {
+    // credential 'password': the customer chose to have the Plesk password stored (Plesk gave no key); otherwise a secret key
+    return new PleskClient({ host: conn.panelHost, port: conn.port, username: conn.username, ...(conn.credential === 'password' ? { password: key } : { key }), pinnedIp });
+  }
+  return new DaClient({ host: conn.panelHost, port: conn.port, username: conn.username, key, fileApi: conn.fileApi, pinnedIp });
 }
 
 function upsert(list, conn) {
@@ -179,7 +196,58 @@ export class AccountSession {
     return this.m.isExpired(this.conn);
   }
 
+  /** 'directadmin' or 'plesk' (a connection saved before Plesk was supported has no `panel` and is DirectAdmin). */
+  get panel() {
+    return this.conn?.panel || 'directadmin';
+  }
+
+  /** The DirectAdmin client of this account. Plesk accounts get a clear answer instead: their tools are added one by one. */
   async da() {
+    if (!this.m.loaded) await this.m.load();
+    if (this.conn?.panel === 'plesk') {
+      throw new UserError(
+        `${this.conn.id} is a Plesk account. This tool is not available for Plesk accounts yet. What works on Plesk: account_info, deploy, rollback, files_* (list, read, write, mkdir, delete, move, chmod, archive, extract, upload, download), db_*, node_*, logs, check_url. Use one of those if it does the job; otherwise tell the user, and do not try another way around it.`,
+        'PANEL_UNSUPPORTED',
+      );
+    }
+    return this.client();
+  }
+
+  /** The Plesk client of this account (a DirectAdmin account gets a clear answer). */
+  async plesk() {
+    if (!this.m.loaded) await this.m.load();
+    if (this.conn && this.conn.panel !== 'plesk') throw new UserError(`${this.conn.id} is a DirectAdmin account, not a Plesk one.`, 'PANEL_MISMATCH');
+    return this.client();
+  }
+
+  /**
+   * A signed-in Plesk WEB session (for the Node.js extension and other panel pages that have no public API). It signs in with
+   * the stored Plesk password, so it exists only for accounts connected that way.
+   */
+  async web() {
+    if (!this.m.loaded) await this.m.load();
+    const conn = this.conn;
+    if (!conn) throw new NotConnectedError();
+    if (conn.panel !== 'plesk') throw new UserError(`${conn.id} is a DirectAdmin account, not a Plesk one.`, 'PANEL_MISMATCH');
+    if (conn.credential !== 'password') {
+      throw new UserError(`${conn.id} was connected with a Plesk secret key, and a key cannot sign in to the Plesk panel, which this tool needs. Ask the user to run \`connect\` again (the sign-in then keeps the Plesk password).`, 'PLESK_NEEDS_PASSWORD');
+    }
+    if (this.m.isExpired(conn)) {
+      throw new UserError(`The saved login of ${conn.id} expired on ${conn.expiresAt}. Call \`connect\` so the user can sign in again.`, 'KEY_EXPIRED');
+    }
+    let web = this.m._webs.get(conn.id);
+    if (!web) {
+      const password = await this.store.getSecret(secretName(conn, 'key'));
+      if (!password) throw new NotConnectedError(`The connection details of ${conn.id} are saved but its Plesk password is missing from this computer's secure storage. Call \`connect\` again.`);
+      const pinnedIp = await verifyPanelHost(conn.panelHost, this.m.verifyOpts);
+      web = new PleskWeb({ host: conn.panelHost, port: conn.port, username: conn.username, password, pinnedIp });
+      this.m._webs.set(conn.id, web);
+    }
+    return web;
+  }
+
+  /** The client for whichever panel this account is on (DirectAdmin: DaClient, Plesk: PleskClient). */
+  async client() {
     if (!this.m.loaded) await this.m.load();
     const conn = this.conn;
     if (!conn) throw new NotConnectedError();
@@ -200,7 +268,7 @@ export class AccountSession {
       // The saved connection file is plain JSON on disk: whatever it says, credentials only ever go to a kapaweb panel.
       // (verifyPanelHost's own message already distinguishes "not a kapaweb server" from "could not resolve it right now".)
       const pinnedIp = await verifyPanelHost(conn.panelHost, this.m.verifyOpts);
-      da = new DaClient({ host: conn.panelHost, port: conn.port, username: conn.username, key, fileApi: conn.fileApi, pinnedIp });
+      da = makeClient(conn, key, pinnedIp);
       this.m._das.set(conn.id, da);
     }
     return da;

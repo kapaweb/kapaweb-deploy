@@ -44,5 +44,13 @@ export async function doctor() {
   const paused = pausedHosts();
   if (paused.length === 0) ok('sign-in is not paused (no run of wrong passwords is being held back)');
   else for (const p of paused) out.push(`  PAUSED sign-in to ${p.host} for ${describeWait(p.retryAfterMs)} after several wrong passwords in a row (state: lockout.json, history: signin.log in the settings folder)`);
+  out.push('');
+  out.push('If your AI app blocks a write to the hosting (Claude Code auto mode checks every change to a live server):');
+  out.push('  - say yes in the chat and name the action ("yes, deploy these files to example.gr"), or');
+  out.push('  - /permissions -> Recently denied -> press r, or leave auto mode with Shift+Tab, or');
+  out.push('  - allow the connector\'s tools in YOUR ~/.claude/settings.json (this is printed, never written for you):');
+  out.push('      { "permissions": { "allow": ["mcp__kapaweb__*"] } }');
+  out.push('    (a narrower list, e.g. mcp__kapaweb__deploy and mcp__kapaweb__write_file, keeps delete / db_drop / rollback behind a question).');
+  out.push('  More: playbook section 17 (https://kapaweb.gr/deploy-with-ai/playbook.md).');
   return out.join('\n');
 }

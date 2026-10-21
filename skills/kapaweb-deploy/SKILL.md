@@ -1,6 +1,6 @@
 ---
 name: kapaweb-deploy
-description: Deploy a website, PHP app or WordPress to kapaweb DirectAdmin hosting, manage its databases, PHP version, SSL and cron, and check the result. Use when the user mentions kapaweb, kapaweb hosting, uploading or publishing a site to their kapaweb account, or moving a database there.
+description: Deploy a website, PHP app or WordPress to kapaweb hosting (DirectAdmin; Plesk preview), manage its databases, PHP version, SSL and cron, and check the result. Use when the user mentions kapaweb, kapaweb hosting, uploading or publishing a site to their kapaweb account, or moving a database there.
 ---
 
 Use the kapaweb connector tools (server `kapaweb`) for everything on the user's kapaweb hosting.

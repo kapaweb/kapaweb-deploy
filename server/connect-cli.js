@@ -69,7 +69,7 @@ export function alreadyOpenMessage(open) {
 /** What the AI is told once the page is up. The address is only handed over when no browser could be started, or when it was asked for. */
 export function startMessage(first) {
   if (first.opened && !first.url) {
-    return "A sign-in page opened in the user's browser. The user types their DirectAdmin address, username and password THERE (they go only to their hosting panel, never to you or the chat). The page stays open for 15 minutes. Do not open it yourself and do not wait for it: carry on with the next step." +
+    return "A sign-in page opened in the user's browser. The user types their hosting panel address (DirectAdmin or Plesk), username and password THERE (they go only to their hosting panel, never to you or the chat). The page stays open for 15 minutes. Do not open it yourself and do not wait for it: carry on with the next step." +
       " When you need the connection, call account_info with wait_seconds=45 (from a shell: --call account_info wait_seconds=45; repeat while sign_in.status is still_waiting, up to 15 minutes in all): it returns the moment they have signed in, so they never have to tell you that they are done.";
   }
   if (first.opened) {

@@ -34,8 +34,14 @@ import { deploy, rollback, targetPaths, WORK_DIR } from './deploy.js';
 import { checkUrl, phpProbe, EXTRA_CHECK_DOMAINS } from './web.js';
 import { hasFirewallBlock, mergeHtaccess } from './htaccess.js';
 import { checkForUpdate } from './update.js';
+import { pleskTools } from './tools-plesk.js';
+import { pleskDbHandlers } from './tools-plesk-db.js';
+import { pleskFileTools, pleskSiteHandlers } from './tools-plesk-files.js';
+import { LIST_MAX, LIST_SORTS, LIST_TYPES, pageList } from './list-page.js';
 import { configDir } from './store.js';
 
+/** Shown in account_info: an AI app's own safety check (Claude Code auto mode) may block a write to the live hosting. */
+const WRITE_BLOCK_HINT = 'Not an error of the connector: if your app blocks a write to this hosting, stop, say so in one sentence, do not retry or look for another way, and show the user their options (playbook section 17). Before the first change, tell the user what will change and get a clear yes.';
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -249,6 +255,10 @@ export function buildTools() {
     tools.push(def);
   };
   const state = { setup: null, lastSetup: null };
+  // what the Plesk-only code (tools-plesk*.js) borrows from here
+  const pleskHelpers = { schema, S, N, B, A, READ, WRITE, DESTRUCTIVE, optString, optBool, optInt, optStringArray, reqString, reqStringArray, reqDomain, configDir, mb, assertGzipIntact, looksLikeEnvFile, isUnreadableName, redactor, randomAlnum, truncate };
+  const pdb = pleskDbHandlers(pleskHelpers);
+  const pdeploy = pleskSiteHandlers(pleskHelpers);
   const POLL_MS = Number(process.env.KAPAWEB_CONNECTOR_POLL_MS) > 0 ? Number(process.env.KAPAWEB_CONNECTOR_POLL_MS) : 1000;
   /**
    * Waits (at most `seconds`) for a sign-in that is in progress to finish. The user should never have to tell the AI "I am done": the AI
@@ -320,13 +330,13 @@ export function buildTools() {
   }
 
   /** One account for the AI: who it is and when its key ends (no secrets). */
-  const summary = (session, c) => ({ account: c.id, username: c.username, panel: c.panelHost, key_expires: c.expiresAt || 'never', key_expired: session.isExpired(c) });
+  const summary = (session, c) => ({ account: c.id, username: c.username, panel: c.panelHost, panel_type: c.panel || 'directadmin', key_expires: c.expiresAt || 'never', key_expired: session.isExpired(c) });
 
   add({
     name: 'connect',
     title: 'Connect a hosting account (user signs in once)',
     description:
-      'Starts the one-time sign-in. It opens a page on the USER\'S OWN COMPUTER where they type their DirectAdmin address, username and password; the password never reaches you or the chat. The connector swaps it for a restricted login key and forgets the password. After calling this, tell the user to complete the page in their browser. Do NOT ask them to tell you when they are done, and do not end your turn: call account_info with wait_seconds=45 (repeat while it says still_waiting, up to 15 minutes in all), which returns the moment they have signed in; then carry on with the task. (With an older connector that does not know wait_seconds, call account_info every 5 to 10 seconds instead.) A customer can have several hosting accounts: to ADD another one, call connect with force:true (every connected account stays connected). NEVER ask the user for a password, key or token in the chat, and NEVER open, fetch, read or fill in the sign-in page yourself (no browser or fetch tool): only the user types there. After several wrong passwords in a row sign-in is paused (5 minutes, then twice as long each time): if connect says so, tell the user how long and do not call it again before then.',
+      'Starts the one-time sign-in. It opens a page on the USER\'S OWN COMPUTER where they type their hosting panel address (DirectAdmin or Plesk, from the welcome e-mail), username and password; the password never reaches you or the chat. The connector swaps it for a restricted login key and forgets the password. After calling this, tell the user to complete the page in their browser. Do NOT ask them to tell you when they are done, and do not end your turn: call account_info with wait_seconds=45 (repeat while it says still_waiting, up to 15 minutes in all), which returns the moment they have signed in; then carry on with the task. (With an older connector that does not know wait_seconds, call account_info every 5 to 10 seconds instead.) A customer can have several hosting accounts: to ADD another one, call connect with force:true (every connected account stays connected). NEVER ask the user for a password, key or token in the chat, and NEVER open, fetch, read or fill in the sign-in page yourself (no browser or fetch tool): only the user types there. After several wrong passwords in a row sign-in is paused (5 minutes, then twice as long each time): if connect says so, tell the user how long and do not call it again before then.',
     inputSchema: schema({
       force: B('Start again even if an account is already connected: to ADD another hosting account, to renew a key, or although a sign-in page is still open (only when the user says it is gone).'),
       account: S('Only to sign in again to one account whose key expired: its username (or username@panel). The page then shows that account\'s details.'),
@@ -363,7 +373,7 @@ export function buildTools() {
         return {
           status: 'sign_in_page_already_open',
           page_opened_seconds_ago: open.seconds,
-          say_to_user: `A sign-in page is already open in your browser (opened ${describeAgo(open.seconds)}). Type your DirectAdmin address, username and password there; you do not need to tell me when you are done, I will notice.`,
+          say_to_user: `A sign-in page is already open in your browser (opened ${describeAgo(open.seconds)}). Type your hosting panel address (DirectAdmin or Plesk), username and password there; you do not need to tell me when you are done, I will notice.`,
           next: 'Call account_info with wait_seconds=45 (repeat while it says still_waiting, up to 15 minutes in all): it returns the moment they have signed in. Do not ask them to confirm. Only if they say the page is gone or does not work, call connect again with force:true.',
         };
       }
@@ -391,10 +401,10 @@ export function buildTools() {
         page_opened_in_browser: setup.opened,
         ...(showUrl ? { url: setup.url } : {}),
         say_to_user: showUrl && !setup.opened
-          ? `Open this address in your browser on this computer: ${setup.url} . Type your DirectAdmin address, username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice.`
+          ? `Open this address in your browser on this computer: ${setup.url} . Type your hosting panel address (DirectAdmin or Plesk), username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice.`
           : showUrl
-            ? `Open this address in your browser on this computer: ${setup.url} . Type your DirectAdmin address, username and password there; you do not need to tell me when you are done, I will notice.`
-            : 'I opened a page in your browser. Type your DirectAdmin address, username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice. If no page appeared, tell me and I will show you the address.',
+            ? `Open this address in your browser on this computer: ${setup.url} . Type your hosting panel address (DirectAdmin or Plesk), username and password there; you do not need to tell me when you are done, I will notice.`
+            : 'I opened a page in your browser. Type your hosting panel address (DirectAdmin or Plesk), username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice. If no page appeared, tell me and I will show you the address.',
         next: 'Do not ask the user to tell you when they are done and do not end your turn: call account_info with wait_seconds=45 (repeat while it says still_waiting, up to 15 minutes in all); it returns the moment they have signed in. Never open the page yourself.',
       };
     },
@@ -410,9 +420,30 @@ export function buildTools() {
       await ctx.session.load();
       const keyId = ctx.session.conn?.keyId;
       const id = ctx.session.conn?.id;
+      const isPlesk = ctx.session.panel === 'plesk';
       if (state.setup) state.setup.close();
+      const storedPassword = isPlesk && ctx.session.conn?.credential === 'password';
+      let revoked = false;
+      if (isPlesk && !storedPassword) {
+        // A Plesk key keeps working until it is deleted in Plesk, so try that first (it needs the key that is about to be forgotten).
+        try {
+          revoked = await (await ctx.session.plesk()).revokeSecretKey();
+        } catch {
+          revoked = false;
+        }
+      }
       await ctx.session.forget();
-      return { disconnected: true, ...(id ? { account: id } : {}), revoke_now: keyId ? `In DirectAdmin open Login Keys and delete the key named ${keyId}.` : undefined };
+      return {
+        disconnected: true,
+        ...(id ? { account: id } : {}),
+        ...(storedPassword
+          ? { password_forgotten_on_this_computer: true, advice: 'The Plesk password was only stored here and is now forgotten. If this computer is shared or lost, also change the Plesk password.' }
+          : isPlesk
+          ? revoked
+            ? { key_revoked_in_plesk: true }
+            : { revoke_now: `Plesk could not be asked to delete the key (it keeps working until it is deleted): in Plesk, open the profile's API keys and delete the key described "kapaweb connector ${keyId}".` }
+          : { revoke_now: keyId ? `In DirectAdmin open Login Keys and delete the key named ${keyId}.` : undefined }),
+      };
     },
   });
 
@@ -458,6 +489,7 @@ export function buildTools() {
             const row = summary(session, c);
             if (row.key_expired) return { ...row, connected: false, next: `The key expired. Call connect with account=${c.username}.` };
             try {
+              if (c.panel === 'plesk') return { ...row, connected: true, subscriptions: await (await session.forAccount(c.id).plesk()).webspaces() };
               const cfg = (await session.forAccount(c.id).da().then((da) => da.get('/api/session/user-config'))).body || {};
               return { ...row, connected: true, package: cfg.package, domains: accountDomains(cfg), server_ip: cfg.ip, suspended: cfg.suspended || false };
             } catch (err) {
@@ -481,9 +513,25 @@ export function buildTools() {
         key_expired: acct.isExpired(),
         ip_locked_to: acct.conn.ipLock || null,
         key_storage: session.store.backendName, // (not called "secret_...": the output redaction would blank it)
-        file_api: acct.conn.fileApi === 'legacy' ? 'legacy (older DirectAdmin: backups are folders, no ssl_* tools)' : 'modern',
+        panel_type: acct.conn.panel || 'directadmin',
+        ...(acct.panel === 'plesk' ? { login_kept_as: acct.conn.credential === 'password' ? 'the Plesk password, in this computer\'s protected storage' : 'a Plesk secret key' } : { file_api: acct.conn.fileApi === 'legacy' ? 'legacy (older DirectAdmin: backups are folders, no ssl_* tools)' : 'modern' }),
       };
       if (acct.isExpired()) return { connected: false, connection: conn, next: `The key expired. Call connect${accounts.length > 1 ? ` with account=${acct.conn.username}` : ''}.`, ...versionInfo };
+      if (acct.panel === 'plesk') {
+        const xml = await acct.plesk();
+        const subscriptions = await xml.webspaces();
+        const domains = [];
+        for (const s of subscriptions) for (const r of await xml.webRoots(s.id).catch(() => [])) domains.push({ domain: r.domain, web_root: r.path });
+        return {
+          connected: true,
+          connection: conn,
+          account: { username: acct.conn.username, subscriptions, domains },
+          if_your_app_blocks_a_write: WRITE_BLOCK_HINT,
+          note: 'This is a Plesk account (Plesk support is in preview). Paths are inside the subscription: /httpdocs is the web root, /private holds private files. Work with: deploy and rollback (a local folder to a domain), files_* (list, read, write, mkdir, delete, move, chmod, archive, extract, upload, download), db_* (MySQL/MariaDB and PostgreSQL), node_* (Node.js: enable, configure, install, run, env, restart), logs (type "node" shows the app\'s output), check_url. Not available for Plesk accounts yet: php_*, usage, disk_usage, ssl_*, subdomain_*, cron_*, secret tools work as on DirectAdmin.',
+          ...(accounts.length > 1 ? { other_accounts: accounts.filter((c) => c.id !== acct.conn.id).map((c) => c.id) } : {}),
+          ...versionInfo,
+        };
+      }
       const da = await acct.da();
       const cfg = (await da.get('/api/session/user-config')).body || {};
       return {
@@ -511,6 +559,7 @@ export function buildTools() {
           note: '0 or "unlimited" means no limit',
         },
         features: { ssh: cfg.ssh, cron: cfg.cron, php: cfg.php, ssl: cfg.ssl, lets_encrypt: cfg.letsEncrypt, cgi: cfg.cgi, dns_control: cfg.dnsControl },
+        if_your_app_blocks_a_write: WRITE_BLOCK_HINT,
         ...(accounts.length > 1 ? { other_accounts: accounts.filter((c) => c.id !== acct.conn.id).map((c) => c.id) } : {}),
         ...versionInfo,
       };
@@ -675,13 +724,15 @@ export function buildTools() {
   add({
     name: 'logs',
     title: 'Read the error log or access log',
-    description: 'Returns the last lines of the domain\'s Apache error log (type "error", where PHP warnings and fatals appear as "AH01071: Got error \'PHP message: ...\'") or access log (type "log"). display_errors is off on live sites, so a blank page or HTTP 500 is explained here. Secrets are redacted.',
-    inputSchema: schema({ domain: S('The domain.'), type: S('"error" (default) or "log".', { enum: ['error', 'log'] }), tail: N('How many last lines (default 150, max 500).', { minimum: 10, maximum: 500 }), contains: S('Only lines containing this text (case-insensitive).') }, ['domain']),
+    description: 'Returns the last lines of the domain\'s Apache error log (type "error", where PHP warnings and fatals appear as "AH01071: Got error \'PHP message: ...\'") or access log (type "log"). display_errors is off on live sites, so a blank page or HTTP 500 is explained here. Plesk accounts also have type "node": the output and crashes of the Node.js application. Secrets are redacted.',
+    inputSchema: schema({ domain: S('The domain.'), type: S('"error" (default) or "log"; Plesk accounts also "node".', { enum: ['error', 'log', 'node'] }), tail: N('How many last lines (default 150, max 500).', { minimum: 10, maximum: 500 }), contains: S('Only lines containing this text (case-insensitive).') }, ['domain']),
     annotations: READ,
-    async handler(args, { session }) {
+    async handler(args, ctx) {
+      const { session } = ctx;
+      if (session.panel === 'plesk') return pdeploy.logs(args, ctx);
       const domain = reqDomain(args);
       const type = optString(args, 'type') || 'error';
-      if (!['error', 'log'].includes(type)) throw new UserError('type must be "error" or "log".');
+      if (!['error', 'log'].includes(type)) throw new UserError('type must be "error" or "log" (type "node" is for Plesk accounts).');
       const tail = optInt(args, 'tail', 150, { min: 10, max: 500 });
       const contains = optString(args, 'contains', { max: 200 });
       const da = await session.da();
@@ -698,16 +749,37 @@ export function buildTools() {
   add({
     name: 'list_files',
     title: 'List a folder',
-    description: 'Lists files and folders. Paths are relative to the account home (for example /domains/example.gr/public_html). Only /domains, /tmp and /public_html are available.',
-    inputSchema: schema({ path: S('Folder path.'), limit: N('Max entries to return (default 300).', { minimum: 1, maximum: 2000 }) }, ['path']),
+    description:
+      'Lists files and folders. Paths are relative to the account home (for example /domains/example.gr/public_html). Only /domains, /tmp and /public_html are available. ' +
+      `A big folder is never cut off silently: the answer says how many entries match (matched) and where the next page starts (next_offset): call again with offset=<next_offset>, up to ${LIST_MAX} entries per call. ` +
+      'To find things instead of paging: name_contains (part of the name), type (file, dir, link), sort (name, size_desc, modified_desc, modified_asc). summary=true lists nothing and answers "what is in here?": counts, total size, the biggest extensions and files, newest and oldest.',
+    inputSchema: schema(
+      {
+        path: S('Folder path.'),
+        limit: N(`Entries per call (default 300, max ${LIST_MAX}).`, { minimum: 1, maximum: LIST_MAX }),
+        offset: N('Skip this many entries (default 0): the next_offset of the previous answer.', { minimum: 0 }),
+        name_contains: S('Only entries whose name contains this text (not case sensitive).'),
+        type: S('Only this kind of entry.', { enum: LIST_TYPES }),
+        sort: S('Order (default name).', { enum: LIST_SORTS }),
+        summary: B('true: counts, total size, extensions, biggest and newest instead of the entries (default false).'),
+      },
+      ['path'],
+    ),
     annotations: READ,
     async handler(args, { session }) {
       const path = normPath(reqString(args, 'path'));
       assertListable(path);
-      const limit = optInt(args, 'limit', 300, { min: 1, max: 2000 });
+      const o = {
+        limit: optInt(args, 'limit', 300, { min: 1, max: LIST_MAX }),
+        offset: optInt(args, 'offset', 0, { min: 0, max: 100000000 }),
+        nameContains: optString(args, 'name_contains', { max: 200 }),
+        type: optString(args, 'type', { max: 10 }) || 'any',
+        sort: optString(args, 'sort', { max: 20 }) || 'name',
+        summary: optBool(args, 'summary', false),
+      };
       const da = await session.da();
       const r = await fmList(da, path);
-      return { path: r.path, total: r.total, shown: Math.min(limit, r.entries.length), entries: r.entries.slice(0, limit) };
+      return { path: r.path, total: r.total, ...pageList(r.entries, o) };
     },
   });
 
@@ -928,11 +1000,14 @@ export function buildTools() {
         backup: S('"full" (default), "skip_uploads" (a partial backup that leaves out wp-content and data folders such as uploads, storage, media, files, cache; with mode "replace" those must be in keep) or "none".', { enum: ['full', 'skip_uploads', 'none'] }),
         confirm_no_backup: B('Required for backup "none", after the user agreed.'),
         dry_run: B('Only report what would happen.'),
+        target_path: S('Plesk accounts only: deploy to this folder of the subscription instead of the domain\'s web root, for example /private/app for a Node.js app whose files must not be public (the web root is then left alone).'),
       },
       ['source_dir', 'domain'],
     ),
     annotations: DESTRUCTIVE,
     async handler(args, ctx) {
+      if (ctx.session.panel === 'plesk') return pdeploy.deploy(args, ctx);
+      if (args.target_path) throw new UserError('target_path is for Plesk accounts only.');
       const da = await ctx.session.da();
       return deploy(
         { da, progress: ctx.progress },
@@ -958,9 +1033,11 @@ export function buildTools() {
     exclusive: true,
     title: 'Restore the backup made before the last deploy',
     description: `Restores the latest backup (or a named one) of the domain's web root from ${WORK_DIR}. The current state is saved first. Use when a deploy broke the site and cannot be fixed quickly.`,
-    inputSchema: schema({ domain: S('The domain.'), subfolder: S('The subfolder that was deployed, if any.'), backup: S('Backup file name from an earlier deploy or rollback result (default: the latest real backup). If a rollback failed halfway, name the "state before rollback" file it reported.') }, ['domain']),
+    inputSchema: schema({ domain: S('The domain.'), subfolder: S('The subfolder that was deployed, if any.'), backup: S('Backup file name from an earlier deploy or rollback result (default: the latest real backup). If a rollback failed halfway, name the "state before rollback" file it reported.'), target_path: S('Plesk accounts only: the folder that was deployed with target_path.') }, ['domain']),
     annotations: DESTRUCTIVE,
     async handler(args, ctx) {
+      if (ctx.session.panel === 'plesk') return pdeploy.rollback(args, ctx);
+      if (args.target_path) throw new UserError('target_path is for Plesk accounts only.');
       const da = await ctx.session.da();
       return rollback({ da, progress: ctx.progress }, { domain: reqDomain(args), subfolder: optString(args, 'subfolder', { max: 120 }), backup: optString(args, 'backup', { max: 200 }) });
     },
@@ -972,7 +1049,9 @@ export function buildTools() {
     description: 'Requests a URL on one of the account\'s domains, or on osotir.org, dsamoodle.de, t-support.gr or zebs.ch, and returns status, content type, redirect target and the first part of the body. Use it to verify a deploy (home page, a deeper page, a CSS file). Before DNS points to this server, pass resolve_ip = server_ip from account_info; the certificate is then not checked (and the result says so).',
     inputSchema: schema({ url: S('Full URL, e.g. https://example.gr/'), resolve_ip: S('Connect to this IP instead of using DNS.'), method: S('GET (default) or HEAD.', { enum: ['GET', 'HEAD'] }) }, ['url']),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    async handler(args, { session }) {
+    async handler(args, ctx) {
+      const { session } = ctx;
+      if (session.panel === 'plesk') return pdeploy.checkUrl(args, ctx);
       const da = await session.da();
       const cfg = (await da.get('/api/session/user-config')).body || {};
       return checkUrl({ url: reqString(args, 'url', { max: 2000 }), resolveIp: checkedResolveIp(args, cfg), method: optString(args, 'method') || 'GET', allowedHosts: [...accountDomains(cfg), ...EXTRA_CHECK_DOMAINS] });
@@ -984,10 +1063,12 @@ export function buildTools() {
   add({
     name: 'db_list',
     title: 'List databases',
-    description: 'Lists the account\'s databases with size and table count, and the database limit.',
-    inputSchema: schema(),
+    description: 'Lists the account\'s databases with size and table count, and the database limit. (Plesk accounts: MySQL/MariaDB and PostgreSQL databases of the subscription, with host, port and users.)',
+    inputSchema: schema({ domain: S('Plesk accounts only: the subscription, when the login has several.') }),
     annotations: READ,
-    async handler(_a, { session }) {
+    async handler(_a, ctx) {
+      const { session } = ctx;
+      if (session.panel === 'plesk') return pdb.list(_a, ctx);
       const da = await session.da();
       const dbs = (await da.get('/api/db-show/databases')).body;
       const usage = (await da.get('/api/session/user-usage')).body?.mySqlDatabases;
@@ -999,10 +1080,12 @@ export function buildTools() {
     name: 'db_create',
     title: 'Create a database and user',
     description:
-      'Creates a MySQL/MariaDB database and a user of the same name (<username>_<suffix>) with a strong random password, utf8mb4, reachable from localhost only. The password is stored ONLY in this computer\'s protected storage and is never shown: put it into the app\'s config with write_file using the placeholder {{KW_DB_PASSWORD:<database>}}. The app connects to host "localhost".',
-    inputSchema: schema({ suffix: S('Short name after the username prefix, lowercase letters, digits and underscore (max 30), e.g. "wp" or "app".') }, ['suffix']),
+      'Creates a MySQL/MariaDB database and a user of the same name (<username>_<suffix>) with a strong random password, utf8mb4, reachable from localhost only. The password is stored ONLY in this computer\'s protected storage and is never shown: put it into the app\'s config with write_file using the placeholder {{KW_DB_PASSWORD:<database>}}. The app connects to host "localhost". On a Plesk account the database can also be PostgreSQL (type "postgresql", port 5432, if the hosting plan has it).',
+    inputSchema: schema({ suffix: S('Short name after the username prefix, lowercase letters, digits and underscore (max 30), e.g. "wp" or "app".'), type: S('Plesk accounts only: "mysql" (default) or "postgresql".', { enum: ['mysql', 'postgresql'] }), domain: S('Plesk accounts only: the subscription, when the login has several.') }, ['suffix']),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    async handler(args, { session }) {
+    async handler(args, ctx) {
+      const { session } = ctx;
+      if (session.panel === 'plesk') return pdb.create(args, ctx);
       const suffix = reqString(args, 'suffix', { pattern: /^[a-z0-9_]{1,30}$/, what: 'may only contain lowercase letters, digits and underscore (max 30)' });
       const da = await session.da();
       const username = await session.username();
@@ -1035,11 +1118,14 @@ export function buildTools() {
         file: S('Absolute path of the dump on this computer.'),
         clean: B('Empty the database first (default false).'),
         confirm_clean: B('Required with clean:true, after the user agreed to destroy the current data.'),
+        domain: S('Plesk accounts only: the subscription, when the login has several.'),
       },
       ['database', 'file'],
     ),
     annotations: DESTRUCTIVE,
-    async handler(args, { session, progress = () => {} }) {
+    async handler(args, ctx) {
+      const { session, progress = () => {} } = ctx;
+      if (session.panel === 'plesk') return pdb.import(args, ctx);
       const database = reqString(args, 'database', { pattern: /^[A-Za-z0-9_]{1,64}$/, what: 'is not a valid database name' });
       const clean = optBool(args, 'clean', false);
       if (clean && !optBool(args, 'confirm_clean', false)) {
@@ -1082,9 +1168,11 @@ export function buildTools() {
     name: 'db_export',
     title: 'Export a database to a file on this computer',
     description: `Exports a database as SQL to a gzip-compressed file on THIS computer (default folder: ${join('<connector settings>', 'exports')}; pass folder to choose another) and returns its path. Any size: the dump is streamed to disk, never held in memory, and it is not stored on the server (so it does not use the account's disk quota). The result says complete:true only when the dump ends with its closing line; if complete is false, do not rely on the file. Do this before risky changes, or to move a database to another hosting (db_import takes the .sql.gz as it is). A large database takes a while: the progress messages show how far it is.`,
-    inputSchema: schema({ database: S('Database name.'), folder: S('Absolute path of a folder on this computer to put the file in (created if missing). Default: the connector\'s own exports folder.') }, ['database']),
+    inputSchema: schema({ database: S('Database name.'), folder: S('Absolute path of a folder on this computer to put the file in (created if missing). Default: the connector\'s own exports folder.'), domain: S('Plesk accounts only: the subscription, when the login has several.') }, ['database']),
     annotations: WRITE,
-    async handler(args, { session, progress = () => {} }) {
+    async handler(args, ctx) {
+      const { session, progress = () => {} } = ctx;
+      if (session.panel === 'plesk') return pdb.export(args, ctx);
       const database = reqString(args, 'database', { pattern: /^[A-Za-z0-9_]{1,64}$/, what: 'is not a valid database name' });
       const da = await session.da();
       const dbs = (await da.get('/api/db-show/databases')).body || [];
@@ -1097,9 +1185,11 @@ export function buildTools() {
     name: 'db_drop',
     title: 'Drop a database created by the connector',
     description: 'Deletes a database and its user, but ONLY if this connector created it. Needs confirm_name equal to the database name and the user\'s explicit agreement. Other databases must be removed by the user in DirectAdmin.',
-    inputSchema: schema({ database: S('Database name.'), confirm_name: S('Repeat the database name to confirm.') }, ['database', 'confirm_name']),
+    inputSchema: schema({ database: S('Database name.'), confirm_name: S('Repeat the database name to confirm.'), domain: S('Plesk accounts only: the subscription, when the login has several.') }, ['database', 'confirm_name']),
     annotations: DESTRUCTIVE,
-    async handler(args, { session }) {
+    async handler(args, ctx) {
+      const { session } = ctx;
+      if (session.panel === 'plesk') return pdb.drop(args, ctx);
       const database = reqString(args, 'database', { pattern: /^[A-Za-z0-9_]{1,64}$/, what: 'is not a valid database name' });
       if (args.confirm_name !== database) throw new UserError('confirm_name must repeat the database name exactly.');
       await session.load();
@@ -1312,6 +1402,10 @@ export function buildTools() {
       },
     });
   }
+
+  // ---- Plesk-only tools (the panel's Node.js extension): they answer "not a Plesk account" for DirectAdmin accounts ----
+  for (const def of pleskTools(pleskHelpers)) add(def);
+  for (const def of pleskFileTools(pleskHelpers)) add(def);
 
   return tools;
 }
