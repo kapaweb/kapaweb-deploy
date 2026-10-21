@@ -1,7 +1,7 @@
 {
   "name": "kapaweb-deploy",
   "displayName": "kapaweb deploy",
-  "description": "Deploy websites, PHP apps and WordPress to kapaweb DirectAdmin hosting from a conversation, without your hosting password ever entering the chat. Includes the kapaweb connector, a local MCP server.",
+  "description": "Deploy websites, PHP apps and WordPress to kapaweb hosting (DirectAdmin; Plesk preview) from a conversation, without your hosting password ever entering the chat. Includes the kapaweb connector, a local MCP server.",
   "author": {
     "name": "Kapaweb",
     "url": "https://kapaweb.gr"
@@ -11,5 +11,5 @@
   "repository": "https://github.com/kapaweb/kapaweb-deploy",
   "privacyPolicyUrl": "https://github.com/kapaweb/kapaweb-deploy#privacy-policy",
   "supportUrl": "https://kapaweb.gr/contact/",
-  "version": "0.7.0"
+  "version": "0.8.0"
 }
