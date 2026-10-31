@@ -1,7 +1,7 @@
 // Shared helpers: errors, random secrets, redaction, small validators.
 import { randomBytes, randomInt } from 'node:crypto';
 
-export const VERSION = '0.8.0';
+export const VERSION = '0.8.1';
 export const PLAYBOOK_URL = 'https://kapaweb.gr/deploy-with-ai/playbook.md';
 
 /** An error whose message is meant to be read by the AI (and the user) verbatim. */
@@ -227,4 +227,14 @@ export function normalizeDomain(raw, name = 'domain') {
 
 export function pretty(value) {
   return JSON.stringify(value, null, 2);
+}
+
+/**
+ * A package limit as a positive number, or 0 when the panel means "no limit". DirectAdmin reports unlimited as -1
+ * (for the disk in MB; in the usage object as -1048576 bytes), sometimes as 0 or the word "unlimited"; none of
+ * these may ever be compared as a real limit.
+ */
+export function limitOrZero(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }

@@ -27,6 +27,7 @@ import {
   reqStringArray,
   truncate,
   isPlainObject,
+  limitOrZero,
 } from './util.js';
 import { assertDeletable, assertListable, assertNotInternal, assertNotWebRootTarget, assertReadable, assertWritable, docrootInfo, isUnreadableName, normPath } from './paths.js';
 import { fmChmod, fmDiskUsage, fmDownload, fmList, fmMkdir, fmMove, fmReadText, fmRemove, fmUpload, isNotFound, octalToDecimal } from './fm.js';
@@ -556,7 +557,7 @@ export function buildTools() {
           memory_max: cfg.memoryMax,
           tasks_max: cfg.tasksMax,
           cpu_quota: cfg.cpuQuota,
-          note: '0 or "unlimited" means no limit',
+          note: '-1, 0 or "unlimited" means no limit',
         },
         features: { ssh: cfg.ssh, cron: cfg.cron, php: cfg.php, ssl: cfg.ssl, lets_encrypt: cfg.letsEncrypt, cgi: cfg.cgi, dns_control: cfg.dnsControl },
         if_your_app_blocks_a_write: WRITE_BLOCK_HINT,
@@ -1091,7 +1092,7 @@ export function buildTools() {
       const username = await session.username();
       const name = `${username}_${suffix}`;
       const usage = (await da.get('/api/session/user-usage')).body?.mySqlDatabases;
-      if (usage && !usage.unlimited && usage.limit && usage.usage >= usage.limit) throw new UserError(`The package allows ${usage.limit} database(s) and all are used. Do not delete a database to make room without the user's decision.`);
+      if (usage && !usage.unlimited && limitOrZero(usage.limit) && usage.usage >= usage.limit) throw new UserError(`The package allows ${usage.limit} database(s) and all are used. Do not delete a database to make room without the user's decision.`);
       const existing = (await da.get('/api/db-show/databases')).body || [];
       if (existing.some((d) => d.database === name)) throw new UserError(`The database ${name} already exists. Choose another suffix, or reuse it if it is the user's.`);
       const password = randomAlnum(24);

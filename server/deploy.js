@@ -8,7 +8,7 @@ import { isAbsolute, join, resolve, parse as parsePath } from 'node:path';
 import { ZipWriter, readZip, extractEntry } from './zip.js';
 import { archiveExt, backupMode, fmChmod, fmCreateArchive, fmExtract, fmList, fmMkdir, fmReadText, fmRemove, fmUpload, fmDiskUsage, isNotFound } from './fm.js';
 import { hasFirewallBlock, mergeHtaccess } from './htaccess.js';
-import { UserError, normalizeDomain } from './util.js';
+import { UserError, normalizeDomain, limitOrZero } from './util.js';
 import { isSecretFileName, normPath } from './paths.js';
 import { describeError } from './da.js';
 
@@ -451,14 +451,15 @@ export async function deploy({ da, progress = () => {} }, o) {
   const cfg = (await da.get('/api/session/user-config')).body || {};
   const usage = (await da.get('/api/session/user-usage')).body || {};
   const used = (await fmDiskUsage(da, '/').catch(() => null)) || {};
-  const quotaBytes = cfg.quotaLim ? Number(cfg.quotaLim) * 1048576 : 0;
+  // an unlimited package reports -1 (or "unlimited" / 0): then there is no disk limit to check against
+  const quotaBytes = usage.quotaBytes?.unlimited === true ? 0 : limitOrZero(cfg.quotaLim) * 1048576;
   if (quotaBytes && (used.sizeOnDiskBytes || 0) + total * 3 > quotaBytes) {
     throw new UserError(
       `Not enough disk space: the package has ${Math.round(quotaBytes / 1048576)} MB, ${Math.round((used.sizeOnDiskBytes || 0) / 1048576)} MB are used, and this deploy needs about ${Math.round((total * 3) / 1048576)} MB (archive + extracted files + backup). Free space or ask the user about a larger package.`,
     );
   }
   const inode = usage.inode;
-  if (inode && !inode.unlimited && inode.limit && inode.usage + local.files.length > inode.limit) {
+  if (inode && !inode.unlimited && limitOrZero(inode.limit) && inode.usage + local.files.length > inode.limit) {
     throw new UserError(`The package allows ${inode.limit} files and ${inode.usage} are used; this deploy adds about ${local.files.length}.`);
   }
   let existingBytes = 0;
