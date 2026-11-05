@@ -16,7 +16,9 @@ import { UserError, VERSION, redactor } from './util.js';
 export const DEFAULT_PORT = 2222;
 
 /** Idle limit (no byte in either direction) for the big transfers: a database import is silent while the server loads it. */
-export const LONG_TRANSFER_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+export // the largest panel answer read into memory (file downloads, uploads of any size and database exports are streamed to disk instead)
+const MAX_BODY_BYTES = 64 * 1048576;
+const LONG_TRANSFER_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
 export class DaError extends Error {
   constructor(status, type, message, reason, path) {
@@ -283,15 +285,20 @@ export class DaClient {
   }
 
   /** The whole answer into memory (small bodies only: the big transfers use downloadToFile / uploadFile). */
-  async #readAll(res, path, req, limit = Infinity) {
+  async #readAll(res, path, req, limit = MAX_BODY_BYTES, { truncate = false } = {}) {
     const chunks = [];
     let n = 0;
     try {
       for await (const c of res) {
         n += c.length;
+        if (n > limit && !truncate) {
+          res.destroy(); // a hostile panel or a huge file must not fill this computer's memory: stop reading
+          throw new UserError(`The panel's answer to ${path.split('?')[0]} is larger than ${(limit / 1048576).toFixed(1)} MB, more than the connector reads into memory. Nothing was changed by this read.`);
+        }
         if (n <= limit) chunks.push(c);
       }
     } catch (err) {
+      if (err instanceof UserError) throw err;
       throw this.#networkError(err, path, req);
     }
     return chunks;
@@ -335,7 +342,7 @@ export class DaClient {
         r.end();
       },
     });
-    const chunks = await this.#readAll(res, path, req);
+    const chunks = await this.#readAll(res, path, req, opts.maxBytes ? opts.maxBytes + 1 : MAX_BODY_BYTES);
     return this.#interpret(res, chunks, opts, path);
   }
 
@@ -351,7 +358,7 @@ export class DaClient {
     this.#guard();
     const { req, res } = await this.#open('GET', path, { timeoutMs });
     if (res.statusCode >= 300) {
-      const chunks = await this.#readAll(res, path, req, 65536); // an error answer is a small JSON/text body
+      const chunks = await this.#readAll(res, path, req, 65536, { truncate: true }); // an error answer is a small JSON/text body
       return this.#interpret(res, chunks, { raw: true }, path); // always throws for a non-2xx status
     }
     this.redirects = 0;

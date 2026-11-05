@@ -374,7 +374,7 @@ export function pleskFileTools(h) {
         if (!st || !st.isFile()) throw new UserError(`The file ${local} does not exist.`);
         assertLocalFileAllowed(local);
         const name = optString(args, 'name', { max: 255 }) || basename(local);
-        if (isSecretFileName(name) || isUnreadableName(name)) throw new UserError(`${name} is a secret or data file: it is not uploaded through the connector.`);
+        if ([name, basename(local)].some((n) => isSecretFileName(n) || isUnreadableName(n))) throw new UserError(`${name === basename(local) ? name : `${basename(local)} (uploaded as ${name})`} is a secret or data file: it is not uploaded through the connector.`);
         if (st.size <= 1024 * 1024 && looksSecret((await readFile(local)).toString('latin1'))) {
           throw new UserError(`${basename(local)} looks like it contains a private key or an access token, so it is not uploaded.`);
         }

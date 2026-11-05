@@ -9,7 +9,7 @@
 // KAPAWEB_CONNECTOR_ALLOW_FILE_SECRETS=1.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, rm, chmod } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, chmod, rename } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { UserError, accountId, isPlainObject, redactor } from './util.js';
@@ -250,8 +250,12 @@ export class Store {
       await rm(join(configDir(), 'connection.json'), { force: true });
       return;
     }
-    await mkdir(configDir(), { recursive: true });
-    await writeFile(join(configDir(), 'connection.json'), JSON.stringify({ version: 2, accounts }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    await mkdir(configDir(), { recursive: true, mode: 0o700 });
+    // written to a new file and renamed over the old one: a reader (another connector process) sees the old or the new list, never half of one
+    const file = join(configDir(), 'connection.json');
+    const part = `${file}.${process.pid}.tmp`;
+    await writeFile(part, JSON.stringify({ version: 2, accounts }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    await rename(part, file);
   }
 
   // ---- secrets ----

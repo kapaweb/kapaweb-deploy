@@ -39,6 +39,8 @@ export const ALLOW_COMMANDS = [
   'CMD_SUBDOMAIN',
   'CMD_API_CRON_JOBS',
   'CMD_CRON_JOBS',
+  // account backups made and restored by the panel itself (backup_list / backup_create / backup_restore; optional: a panel without it still connects)
+  'CMD_SITE_BACKUP',
 ];
 
 /** The connector's core tools cannot work without these, on any panel. */

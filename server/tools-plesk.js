@@ -174,7 +174,7 @@ export function pleskTools(h) {
         if (manager && !MANAGERS.includes(manager)) throw new UserError(`package_manager must be one of: ${MANAGERS.join(', ')}.`);
         const id = await node.domainId(domain);
         if (!command) return { domain, available_commands: await node.availableCommands(id, manager) };
-        if (!NPM_ARGS.test(command) || /(^|\s)--?(?:prefix|global|g|userconfig|cache)\b/.test(command)) throw new UserError('That command has characters or options that are not allowed here (letters, digits, space and : _ @ . / = + - only; no --prefix, --global, --userconfig, --cache).');
+        if (!NPM_ARGS.test(command) || /(^|\s)--?(?:prefix|global|g|userconfig|cache|registry|script-shell|call|c)\b/.test(command) || /^(exec|x|dlx|create|init|publish|login|adduser|token|config|set|explore)$/.test(command.trim().split(/\s+/)[0])) throw new UserError('That command has characters or options that are not allowed here (letters, digits, space and : _ @ . / = + - only; no --prefix, --global, --userconfig, --cache).');
         const a = await node.app(id);
         const handler = (a?.handlers || []).find((x) => x.id === a?.application?.handlerId);
         const r = await node.runCommand(id, command, handler?.version, manager || a?.application?.pkgManager);

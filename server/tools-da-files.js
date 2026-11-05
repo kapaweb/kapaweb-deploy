@@ -81,6 +81,7 @@ export function daFileOps(h) {
     assertWritable(folder);
     assertNotInternal(folder);
     const info = docrootInfo(folder);
+    if (/^\/domains\/[^/]+\/?$/.test(folder)) throw new UserError(`${folder} holds a web root and the connector's deploy records: an archive unpacked here could replace the web root's .htaccess (the kapaweb firewall block) or forge a deploy record. Unpack into a folder inside the web root, or into /tmp/<folder>.`);
     if (info && info.rel === '') throw new UserError(`${folder} is a web root: unpack into a folder inside it (an archive could replace its .htaccess, which carries the kapaweb firewall block). For a whole site use deploy.`);
     if (args.overwrite === false) throw new UserError('On DirectAdmin an unpack always replaces files of the same name.');
     const archiveName = reqString(args, 'archive', { max: 255 });
@@ -101,7 +102,7 @@ export function daFileOps(h) {
     assertLocalFileAllowed(local);
     const name = optString(args, 'name', { max: 255 }) || basename(local);
     if (name.includes('/')) throw new UserError('"name" is a file name, not a path: the folder goes in "folder".');
-    if (isSecretFileName(name) || isUnreadableName(name)) throw new UserError(`${name} is a secret or data file: it is not uploaded through the connector.`);
+    if ([name, basename(local)].some((n) => isSecretFileName(n) || isUnreadableName(n))) throw new UserError(`${name === basename(local) ? name : `${basename(local)} (uploaded as ${name})`} is a secret or data file: it is not uploaded through the connector.`);
     if (st.size <= 1024 * 1024 && looksSecret((await readFile(local)).toString('latin1'))) {
       throw new UserError(`${basename(local)} looks like it contains a private key or an access token, so it is not uploaded.`);
     }

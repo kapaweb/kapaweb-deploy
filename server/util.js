@@ -1,7 +1,7 @@
 // Shared helpers: errors, random secrets, redaction, small validators.
 import { randomBytes, randomInt } from 'node:crypto';
 
-export const VERSION = '0.8.1';
+export const VERSION = '0.9.0';
 export const PLAYBOOK_URL = 'https://kapaweb.gr/deploy-with-ai/playbook.md';
 
 /** An error whose message is meant to be read by the AI (and the user) verbatim. */
@@ -86,6 +86,27 @@ const ENV_STYLE = /(\b[A-Z][A-Z0-9_]*(?:_KEY|_SK|_PW|_PASS|_PASSWORD|_SECRET|_TO
 // (bounded on purpose: an unbounded scheme makes a long run of "a-a-a-..." cost quadratic time)
 const URL_CREDENTIALS = /(\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:@/]{1,100}:)([^\s@/]{1,200})(@)/gi;
 const DASH_P = /(\bmysql\w*\b[^\n]*?\s-p)(?!id-file|retty)([^\s'"-][^\s'"]{3,})/g;
+// well-known token shapes, whatever they are labelled as (a key is a key even in a comment or a file called notes.txt)
+const TOKEN_SHAPES = [
+  /\bAKIA(?![0-9A-Z]{9}EXAMPLE)[0-9A-Z]{16}\b/g,
+  /\bsk_live_[0-9a-zA-Z]{20,}\b/g,
+  /\brk_live_[0-9a-zA-Z]{20,}\b/g,
+  /\bxox[baprs]-[0-9A-Za-z-]{20,}\b/g,
+  /\bgh[pousr]_[0-9A-Za-z]{30,}\b/g,
+  /\bgithub_pat_[0-9A-Za-z_]{40,}\b/g,
+  /\bsk-ant-[A-Za-z0-9_-]{20,}/g,
+  /\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}/g,
+  /\bglpat-[0-9A-Za-z_-]{20,}/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, // a JSON web token
+];
+// Cookie / Set-Cookie header lines: the whole value is a session secret
+const COOKIE_LINE = /((?:^|\n)\s*(?:set-)?cookie\s*:\s*)([^\r\n]{4,})/gi;
+// PHP/WordPress define('NONCE_KEY', '...'), define("DB_PASSWORD", "...")
+const PHP_DEFINE = /(define\(\s*['"][A-Za-z0-9_]*(?:KEY|SALT|PASS|PASSWORD|SECRET|TOKEN|PWD)[A-Za-z0-9_]*['"]\s*,\s*)(['"])([^'"\r\n]{4,})\2/gi;
+// a quoted value with spaces: password = "my secret pass phrase"
+const KEY_VALUE_QUOTED =
+  /((?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key|salt|credential)['"]?\s*(?:=>|[:=,])\s*)(['"])([^'"\r\n]{4,})\2/gi;
 const SECRET_KEY_NAME = /pass(word|wd|phrase)?$|^pwd$|^pw$|secret|token|api[_-]?key|private[_-]?key|authorization|cookie|session(id)?$|^key$|login[_-]?key|^otp$|credential/i;
 // {{KW_DB_PASSWORD:<db>}}, {{KW_SECRET:<name>}} and {{KW_RANDOM:<n>}} are instructions for write_file, not secrets: they
 // must reach the AI intact (the key/value rules above would otherwise turn "PASSWORD:mydb}}" into "PASSWORD:[redacted]"
@@ -128,6 +149,10 @@ export class Redactor {
     scrub(KEY_VALUE);
     scrub(ENV_STYLE);
     scrub(DASH_P);
+    out = out.replace(KEY_VALUE_QUOTED, (m, before, q, value) => (value.includes(MARK) ? m : `${before}${q}[redacted]${q}`));
+    out = out.replace(PHP_DEFINE, (m, before, q, value) => (value.includes(MARK) ? m : `${before}${q}[redacted]${q}`));
+    out = out.replace(COOKIE_LINE, '$1[redacted]');
+    for (const re of TOKEN_SHAPES) out = out.replace(re, '[redacted token]');
     if (kept.length) out = out.replace(new RegExp(`${MARK}(\\d+)${MARK}`, 'g'), (_m, i) => kept[Number(i)]);
     return out;
   }

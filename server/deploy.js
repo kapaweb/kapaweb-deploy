@@ -199,7 +199,20 @@ export async function collectFiles(root, { exclude = [], forceInclude = [] } = {
   if (flagged.length) {
     throw new UserError(`These files look like they contain a private key or an access token, so nothing was uploaded: ${flagged.slice(0, 10).join(', ')}. Remove the secret from the file (or from the deploy folder) and try again.`);
   }
+  assertLooksLikeSite(files, htaccess);
   return { files, emptyDirs, skipped, htaccess };
+}
+
+// A folder of documents is not a website: "deploy ~/Documents/Taxes" must not publish it. A site has an entry file at its top (or one level
+// down, for a build output folder inside a project); a folder with office/PDF/mail files and none of that is refused.
+const WEB_ENTRY = /^(index\.(html?|php)|default\.(html?|php)|package\.json|composer\.json|wp-settings\.php|wp-config\.php|server\.(c?js|mjs)|app\.(c?js|mjs|py)|main\.(c?js|py)|manifest\.json|robots\.txt|sitemap\.xml|favicon\.ico|\.user\.ini)$/i;
+const DOCUMENT_FILE = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp|csv|pst|ost|mbox|emlx?|msg|numbers|pages|key|pages|rtf)$/i;
+export function assertLooksLikeSite(files, htaccess) {
+  const docs = files.filter((f) => DOCUMENT_FILE.test(f.rel));
+  if (docs.length === 0) return;
+  const hasEntry = Boolean(htaccess) || files.some((f) => f.rel.split('/').length <= 2 && WEB_ENTRY.test(f.rel.split('/').pop()));
+  if (hasEntry) return;
+  throw new UserError(`This folder looks like a folder of documents, not a website (${docs.length} office/PDF/mail files such as ${docs.slice(0, 3).map((f) => f.rel).join(', ')}, and no index.html, index.php or package.json). Nothing was uploaded. Deploy the project's build output folder; for a plain downloads folder, add an index.html to it.`);
 }
 
 /** Private keys and access tokens, judged by content. Samples in documentation (AWS's "...EXAMPLE" keys, a bare PEM header) do not count. */

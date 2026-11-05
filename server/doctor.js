@@ -48,9 +48,9 @@ export async function doctor() {
   out.push('If your AI app blocks a write to the hosting (Claude Code auto mode checks every change to a live server):');
   out.push('  - say yes in the chat and name the action ("yes, deploy these files to example.gr"), or');
   out.push('  - /permissions -> Recently denied -> press r, or leave auto mode with Shift+Tab, or');
-  out.push('  - allow the connector\'s tools in YOUR ~/.claude/settings.json (this is printed, never written for you):');
-  out.push('      { "permissions": { "allow": ["mcp__kapaweb__*"] } }');
-  out.push('    (a narrower list, e.g. mcp__kapaweb__deploy and mcp__kapaweb__write_file, keeps delete / db_drop / rollback behind a question).');
+  out.push('  - allow the routine write tools in YOUR ~/.claude/settings.json (this is printed, never written for you):');
+  out.push('      { "permissions": { "allow": ["mcp__kapaweb__deploy", "mcp__kapaweb__write_file"] } }');
+  out.push('    (keep restore / rollback / delete / db_drop / cron_create OUT of it: they must keep asking you, and never use the wildcard mcp__kapaweb__*).');
   out.push('  More: playbook section 17 (https://kapaweb.gr/deploy-with-ai/playbook.md).');
   return out.join('\n');
 }

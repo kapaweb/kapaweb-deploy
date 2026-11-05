@@ -199,7 +199,7 @@ function connectHere(tool) {
     ...tool,
     async handler(args, { session }) {
       const lines = [];
-      const code = await connectCli({ force: optBool(args, 'force', false), showUrl: optBool(args, 'show_url', false), account: optString(args, 'account') || '' }, (line) => lines.push(line), session);
+      const code = await connectCli({ force: optBool(args, 'force', false), account: optString(args, 'account') || '' }, (line) => lines.push(line), session);
       if (code !== 0) throw new UserError(lines.join('\n'));
       return lines.join('\n');
     },

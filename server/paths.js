@@ -59,7 +59,8 @@ export function assertWritable(p) {
 /** True when p is (or is inside) a domain's web root; returns the path relative to it. */
 export function docrootInfo(p) {
   const s = segments(p);
-  if (s[0] === 'domains' && s.length >= 3 && s[2] === 'public_html') return { domain: s[1], rel: s.slice(3).join('/') };
+  // private_html is, on DirectAdmin's default setup, a symlink to public_html (the same files): it is a web root as well
+  if (s[0] === 'domains' && s.length >= 3 && (s[2] === 'public_html' || s[2] === 'private_html')) return { domain: s[1], rel: s.slice(3).join('/') };
   if (s[0] === 'public_html') return { domain: null, rel: s.slice(1).join('/') };
   return null;
 }
@@ -75,7 +76,7 @@ export function assertDeletable(p) {
     const rest = s.slice(2);
     if (rest.length === 0) throw new UserError('Refusing to delete a whole domain folder. Domains are removed by kapaweb support or in DirectAdmin.');
     if (rest.length === 1 && DOMAIN_FOLDERS_KEPT.has(rest[0])) throw new UserError(`Refusing to delete ${p} itself; delete its contents instead.`);
-    if (rest.length === 2 && rest[0] === 'public_html' && rest[1] === '.htaccess') {
+    if (rest.length === 2 && (rest[0] === 'public_html' || rest[0] === 'private_html') && rest[1] === '.htaccess') {
       throw new UserError('Refusing to delete the web root .htaccess (it carries the kapaweb firewall block). Use write_file or deploy, which keep that block.');
     }
     return;
@@ -153,11 +154,22 @@ const HARD_SECRET_NAMES = [
   /^firebase.*adminsdk.*\.json$/i,
 ];
 
+// editor/backup copies of a secret file are as secret as the file: "wp-config.php.bak", ".env~", "id_rsa.old"
+const BACKUP_SUFFIX = /(~|\.(bak|old|orig|save|saved|swp|swo|tmp|temp|dist|txt|copy|backup|\d{4,8}))+$/i;
+
+// credential stores of the operating system and of browsers: never uploaded, whatever name the upload is given
+const STORE_NAMES = [/\.keychain(-db)?$/i, /^login data( for account)?$/i, /^(cookies|web data|key[34]\.db|logins\.json|signons\.sqlite)$/i, /^(shadow|master\.passwd|sam|ntds\.dit)$/i, /\.(wallet|kdb|agilekeychain|1pif)$/i];
+
 export function isSecretFileName(name) {
-  return HARD_SECRET_NAMES.some((re) => re.test(name));
+  if (HARD_SECRET_NAMES.some((re) => re.test(name)) || STORE_NAMES.some((re) => re.test(name))) return true;
+  const bare = name.replace(BACKUP_SUFFIX, '');
+  return bare !== name && bare !== '' && HARD_SECRET_NAMES.some((re) => re.test(bare));
 }
+
+// configuration files of other CMSes / frameworks that hold passwords: read_file and downloads refuse them (deploy still ships them: an app needs its settings.php)
+const CONFIG_WITH_SECRETS = /^(env\.php|settings(\.local)?\.php|localsettings\.php|database\.yml|parameters\.yml|secrets\.yml|master\.key|config\.local\.php|local\.xml)$/i;
 
 /** Data files that read_file will not return (dumps are big and full of user data). */
 export function isUnreadableName(name) {
-  return isSecretFileName(name) || /\.(sql|sqlite|sqlite3|db)(\.gz)?$/i.test(name);
+  return isSecretFileName(name) || CONFIG_WITH_SECRETS.test(name.replace(BACKUP_SUFFIX, '')) || /\.(sql|sqlite|sqlite3|db)(\.gz)?$/i.test(name);
 }

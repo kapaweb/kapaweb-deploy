@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describeWait, pausedHosts } from './lockout.js';
 import { clearSignInOpen, describeAgo, markSignInOpen, signInOpen } from './pending.js';
 import { Session } from './session.js';
-import { startSetup } from './setup.js';
+import { copyToClipboard, startSetup } from './setup.js';
 
 const SELF = fileURLToPath(new URL('./index.js', import.meta.url));
 const WORKER_START_MS = 20_000;
@@ -68,6 +68,10 @@ export function alreadyOpenMessage(open) {
 
 /** What the AI is told once the page is up. The address is only handed over when no browser could be started, or when it was asked for. */
 export function startMessage(first) {
+  if (first.copied && !first.url) {
+    return "The sign-in address is on the USER'S CLIPBOARD (it holds a secret, so it is not shown here). Tell the user to paste it into their browser's address bar on this computer (Cmd+V or Ctrl+V, then Enter) and to type their hosting panel address (DirectAdmin or Plesk), username and password THERE (they go only to their hosting panel, never to you or the chat). Do not open the page yourself." +
+      " When you need the connection, call account_info with wait_seconds=45 (from a shell: --call account_info wait_seconds=45; repeat while sign_in.status is still_waiting, up to 15 minutes in all).";
+  }
   if (first.opened && !first.url) {
     return "A sign-in page opened in the user's browser. The user types their hosting panel address (DirectAdmin or Plesk), username and password THERE (they go only to their hosting panel, never to you or the chat). The page stays open for 15 minutes. Do not open it yourself and do not wait for it: carry on with the next step." +
       " When you need the connection, call account_info with wait_seconds=45 (from a shell: --call account_info wait_seconds=45; repeat while sign_in.status is still_waiting, up to 15 minutes in all): it returns the moment they have signed in, so they never have to tell you that they are done.";
@@ -130,7 +134,12 @@ export async function connectWorker() {
   });
   markSignInOpen(); // other connector processes see that the user is signing in right now
   process.once('exit', clearSignInOpen);
-  process.stdout.write(JSON.stringify({ opened: setup.opened, ...(setup.opened && !process.argv.includes('--show-url') ? {} : { url: setup.url }) }) + '\n');
+  // the address holds the page's secret: when the browser did not show the page it goes to the USER's clipboard, not into the chat
+  // (the user's own terminal run with --show-url still prints it)
+  const wantsAddress = !setup.opened || process.argv.includes('--show-url');
+  const showOnConsole = process.argv.includes('--show-url');
+  const copied = wantsAddress ? copyToClipboard(setup.url) : false;
+  process.stdout.write(JSON.stringify({ opened: setup.opened, ...(copied ? { copied: true } : {}), ...(wantsAddress && (showOnConsole || !copied) ? { url: setup.url } : {}) }) + '\n');
   const result = await setup.done;
   clearSignInOpen();
   await new Promise((resolve) => setTimeout(resolve, lingerMs(result.ok)));

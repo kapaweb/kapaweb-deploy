@@ -100,9 +100,10 @@ export class PleskWeb {
     const hdrs = { ...headers };
     if (upload) {
       const boundary = '----kapaweb' + randomBytes(12).toString('hex');
-      const fields = Object.entries(upload.fields || {}).map(([k, v]) => `--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`).join('');
+      const safeName = (v) => String(v).replace(/["\r\n\\]/g, '_');
+      const fields = Object.entries(upload.fields || {}).map(([k, v]) => `--${boundary}\r\nContent-Disposition: form-data; name="${safeName(k)}"\r\n\r\n${String(v).replace(/\r\n--/g, ' --')}\r\n`).join('');
       const filename = String(upload.filename).replace(/["\r\n\\]/g, '_');
-      head = Buffer.from(`${fields}--${boundary}\r\nContent-Disposition: form-data; name="${upload.field}"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`, 'utf8');
+      head = Buffer.from(`${fields}--${boundary}\r\nContent-Disposition: form-data; name="${safeName(upload.field)}"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`, 'utf8');
       tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
       hdrs['Content-Type'] = `multipart/form-data; boundary=${boundary}`;
       hdrs['Content-Length'] = head.length + upload.size + tail.length;
@@ -130,7 +131,7 @@ export class PleskWeb {
         const type = String(res.headers['content-type'] || '');
         if (saveTo && res.statusCode === 200 && !/json|text\/html/i.test(type)) {
           // a file: straight to disk
-          const out = createWriteStream(part);
+          const out = createWriteStream(part, { mode: 0o600 });
           let bytes = 0;
           res.on('data', (c) => (bytes += c.length));
           res.on('error', (e) => out.destroy(e));

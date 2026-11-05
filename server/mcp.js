@@ -121,6 +121,9 @@ export class McpServer {
     });
     this.input.on('end', async () => {
       await Promise.allSettled([...this.inflight]);
+      // everything written so far must reach the client before the process ends: a long answer (the tool list is over 64 KB) is
+      // otherwise cut off in the middle when the client closes its end right after asking
+      await new Promise((resolve) => (this.output.write('', resolve) === false ? this.output.once('drain', resolve) : undefined));
       process.exit(0);
     });
   }

@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { createGunzip } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { DaError, describeError } from './da.js';
-import { startSetup } from './setup.js';
+import { copyToClipboard, startSetup } from './setup.js';
 import { LockedError, describeWait, pausedHosts } from './lockout.js';
 import { describeAgo, signInOpen } from './pending.js';
 import {
@@ -36,6 +36,7 @@ import { checkUrl, phpProbe, EXTRA_CHECK_DOMAINS } from './web.js';
 import { hasFirewallBlock, mergeHtaccess } from './htaccess.js';
 import { checkForUpdate } from './update.js';
 import { pleskTools } from './tools-plesk.js';
+import { BACKUP_SECTIONS, daBackupOps } from './tools-da-backup.js';
 import { pleskDbHandlers } from './tools-plesk-db.js';
 import { pleskFileTools, pleskSiteHandlers } from './tools-plesk-files.js';
 import { LIST_MAX, LIST_SORTS, LIST_TYPES, pageList } from './list-page.js';
@@ -45,6 +46,8 @@ import { configDir } from './store.js';
 const WRITE_BLOCK_HINT = 'Not an error of the connector: if your app blocks a write to this hosting, stop, say so in one sentence, do not retry or look for another way, and show the user their options (playbook section 17). Before the first change, tell the user what will change and get a clear yes.';
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+// adds something every time it is called (a retry would add a second one): not idempotent
+const WRITE_ONCE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 
 function schema(properties = {}, required = []) {
@@ -231,6 +234,30 @@ function accountDomains(cfg) {
 // tool registry
 // ---------------------------------------------------------------------------
 
+
+/**
+ * A cron job runs by itself, for ever, with the account's rights, and survives a disconnect: so the command is limited to what a site really
+ * needs: a PHP binary (or curl/wget fetching one https URL) with plain arguments and an optional output redirection. Chaining (; && |),
+ * substitution ($( ) and backticks), other programs and writing to files through curl/wget are refused.
+ */
+export function checkedCronCommand(command) {
+  const tail = /\s*(?:&?>>?\s*(?:\/dev\/null|\/home\/[A-Za-z0-9._\/-]+))?(?:\s*2>&1)?\s*$/;
+  const body = command.replace(tail, '');
+  if (/[;&|<>`$(){}\\\r\n]/.test(body)) {
+    throw new UserError('A cron command may not chain commands, pipe, redirect inside, or substitute (; & | < > ` $ ( ) { } \\). Use one command, with full paths: for example "/usr/local/php83/bin/php /home/<user>/domains/<domain>/public_html/wp-cron.php >/dev/null 2>&1".');
+  }
+  const [program, ...rest] = body.trim().split(/\s+/);
+  if (/^\/usr\/(local\/php[0-9.]+\/bin|local\/bin|bin)\/php[0-9.]*(-cli)?$/.test(program)) return;
+  if (/^\/usr\/(local\/)?bin\/(curl|wget)$/.test(program)) {
+    const urls = rest.filter((a) => /^https?:\/\/[^\s'"]+$/.test(a));
+    const flags = rest.filter((a) => !urls.includes(a));
+    const okFlags = flags.every((a) => /^(-[sSLqfk46]+|--silent|--quiet|-O-?|-qO-?|-)$/.test(a));
+    if (urls.length === 1 && okFlags) return;
+    throw new UserError('curl/wget in a cron job may only fetch ONE https URL with plain flags (-s -S -L -q -f -k -4 -6, or -O - to print): writing files, uploading or sending data is refused.');
+  }
+  throw new UserError('A cron command must start with a PHP binary by its full path (for example /usr/local/php83/bin/php; php_versions shows the ones installed) or fetch one https URL with /usr/bin/curl or /usr/bin/wget. Other programs are not started by cron jobs made through the connector.');
+}
+
 /** These do not work on one account (connect and account_info deal with all of them themselves). */
 const ACCOUNT_FREE_TOOLS = new Set(['playbook', 'connect', 'account_info']);
 const ACCOUNT_ARG = S('Which connected hosting account this is for: its username (or username@panel). Only needed when more than one account is connected; account_info lists them.');
@@ -341,7 +368,6 @@ export function buildTools() {
     inputSchema: schema({
       force: B('Start again even if an account is already connected: to ADD another hosting account, to renew a key, or although a sign-in page is still open (only when the user says it is gone).'),
       account: S('Only to sign in again to one account whose key expired: its username (or username@panel). The page then shows that account\'s details.'),
-      show_url: B('Only if the user says that no page appeared: also return the page address so they can open it by hand. Never use it to open the page yourself.'),
       wait_seconds: N('Also wait up to this many seconds (at most 55) for the user to finish signing in, and return as soon as they have. Usually easier: call account_info with wait_seconds afterwards.', { minimum: 0, maximum: 55 }),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -389,10 +415,13 @@ export function buildTools() {
         state.lastSetup = { status: result.ok ? 'connected' : 'failed', reason: result.reason, warning: result.warning || undefined, at: new Date().toISOString() };
         if (state.setup === setup) state.setup = null;
       });
-      // The address holds the page's secret token. It is only handed over when the browser could not be started or the
-      // user asked for it: a page opened by the browser needs no address in the chat, and an AI that has the address
-      // could open the page itself and sign in to somebody else's account.
-      const showUrl = !setup.opened || optBool(args, 'show_url', false);
+      // The address holds the page's secret token. It never goes into the chat: an AI that has the address could open the page itself
+      // and sign in to somebody else's account. When the browser did not show the page (force:true after "no page appeared", or the
+      // browser could not be started) the address is put on the USER's clipboard to paste; only if no clipboard program exists is it
+      // handed over, and then only because the user could not otherwise sign in.
+      const needsAddress = !setup.opened || args.force === true;
+      const copied = needsAddress ? copyToClipboard(setup.url) : false;
+      const showUrl = needsAddress && !copied;
       const waited = optInt(args, 'wait_seconds', 0, { min: 0, max: 55 });
       const signIn = waited > 0 ? await waitForSignIn(session, waited, ctx.progress) : null;
       if (signIn?.status === 'connected') return { status: 'connected', account: signIn.account, next: signIn.next };
@@ -400,12 +429,13 @@ export function buildTools() {
         status: 'waiting_for_user',
         ...(signIn ? { sign_in: signIn } : {}),
         page_opened_in_browser: setup.opened,
+        ...(copied ? { address_on_users_clipboard: true } : {}),
         ...(showUrl ? { url: setup.url } : {}),
-        say_to_user: showUrl && !setup.opened
+        say_to_user: showUrl
           ? `Open this address in your browser on this computer: ${setup.url} . Type your hosting panel address (DirectAdmin or Plesk), username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice.`
-          : showUrl
-            ? `Open this address in your browser on this computer: ${setup.url} . Type your hosting panel address (DirectAdmin or Plesk), username and password there; you do not need to tell me when you are done, I will notice.`
-            : 'I opened a page in your browser. Type your hosting panel address (DirectAdmin or Plesk), username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice. If no page appeared, tell me and I will show you the address.',
+          : copied
+            ? 'I put the sign-in address on your clipboard: paste it into your browser\'s address bar (Cmd+V or Ctrl+V) and press Enter. Type your hosting panel address (DirectAdmin or Plesk), username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice.'
+            : 'I opened a page in your browser. Type your hosting panel address (DirectAdmin or Plesk), username and password there (they go only to your hosting panel, not to me); you do not need to tell me when you are done, I will notice. If no page appeared, tell me and I will put its address on your clipboard.',
         next: 'Do not ask the user to tell you when they are done and do not end your turn: call account_info with wait_seconds=45 (repeat while it says still_waiting, up to 15 minutes in all); it returns the moment they have signed in. Never open the page yourself.',
       };
     },
@@ -1354,7 +1384,7 @@ export function buildTools() {
   add({
     name: 'cron_create',
     title: 'Create a cron job',
-    description: 'Creates a cron job. Only for jobs the user asked for. Use full paths and the versioned PHP binary of the site (e.g. /usr/local/php83/bin/php), not just "php". Output goes to a log file or /dev/null. Prefer every 5-15 minutes.',
+    description: 'Creates a cron job. Only for jobs the user asked for. The command must start with the versioned PHP binary of the site by its full path (e.g. /usr/local/php83/bin/php), or fetch one https URL with /usr/bin/curl or /usr/bin/wget; no chaining, pipes or substitution. Output goes to /dev/null or a log file in the account. Prefer every 5-15 minutes.',
     inputSchema: schema(
       { minute: S('Cron field, e.g. "*/10".'), hour: S('Cron field.'), dayofmonth: S('Cron field.'), month: S('Cron field.'), dayofweek: S('Cron field.'), command: S('The command line (single line).') },
       ['minute', 'hour', 'dayofmonth', 'month', 'dayofweek', 'command'],
@@ -1366,6 +1396,7 @@ export function buildTools() {
       for (const f of ['minute', 'hour', 'dayofmonth', 'month', 'dayofweek']) form[f] = reqString(args, f, { pattern: field, what: 'is not a valid cron field' });
       const command = reqString(args, 'command', { max: 1000 });
       if (/[\r\n]/.test(command)) throw new UserError('The command must be a single line.');
+      checkedCronCommand(command);
       form.command = command;
       await (await session.da()).postForm('/CMD_API_CRON_JOBS?json=yes', form);
       return { created: form, next: 'Confirm with cron_list.' };
@@ -1392,17 +1423,86 @@ export function buildTools() {
       name: 'debug_get',
       title: '(debug) Raw read-only panel request',
       description: 'GET one of a few read-only panel endpoints and return the raw JSON (redacted). For connector development only.',
-      inputSchema: schema({ path: S('Panel path with query, e.g. /api/session/user-config') }, ['path']),
+      inputSchema: schema({ path: S('Panel path with query, e.g. /api/session/user-config'), paths_containing: S('Only for /static/swagger.json: list only the endpoint paths containing this text.') }, ['path']),
       annotations: READ,
       async handler(args, { session }) {
-        const path = reqString(args, 'path', { max: 500 });
-        if (!/^\/(api\/(session\/|filemanager\/list|db-show\/|domain-tls\/|login-history)|CMD_(ADDITIONAL_DOMAINS|PHP_SETTINGS|SUBDOMAIN|API_CRON_JOBS|SHOW_LOG))/.test(path)) {
-          throw new UserError('That path is not allowed for debug_get.');
-        }
-        return truncate(pretty((await (await session.da()).get(path)).body), 60000);
+        const raw = reqString(args, 'path', { max: 500 });
+        // parsed, not pattern-matched on the text: "%61ction=restore" or "?x=1&action%3Ddelete" must not slip past a text filter
+        if (/[%\\\s]|\.\./.test(raw) || !raw.startsWith('/')) throw new UserError('That path is not allowed for debug_get.');
+        const u = new URL(raw, 'http://panel.invalid');
+        const okPath =
+          u.pathname === '/static/swagger.json' ||
+          /^\/api\/(session\/[A-Za-z0-9_-]+|filemanager\/list|db-show\/[A-Za-z0-9_/-]*|domain-tls\/[A-Za-z0-9_./-]*|login-history)$/.test(u.pathname) ||
+          /^\/CMD_(ADDITIONAL_DOMAINS|PHP_SETTINGS|SUBDOMAIN|API_CRON_JOBS|SHOW_LOG|SITE_BACKUP)$/.test(u.pathname);
+        const writes = [...u.searchParams].some(([k, v]) => /^(action|select|delete|save|create|restore|backup|submit)/i.test(k) && !(k.toLowerCase() === 'action' && v === 'view'));
+        if (!okPath || writes) throw new UserError('That path is not allowed for debug_get (read-only pages only: no action other than view).');
+        const path = u.pathname + u.search;
+        const body = (await (await session.da()).get(path)).body;
+        const only = optString(args, 'paths_containing', { max: 60 }); // for the panel's swagger.json: only the endpoint paths with this text
+        if (only && body?.paths) return truncate(pretty(Object.fromEntries(Object.entries(body.paths).filter(([k]) => k.toLowerCase().includes(only.toLowerCase())))), 60000);
+        return truncate(pretty(body), 60000);
       },
     });
   }
+
+  // ---- account backups (DirectAdmin "Backup and Restore"): so nobody has to open the panel for it ----
+  const backups = daBackupOps({ reqString, optString, optInt, optStringArray, reqDomain });
+  const notPlesk = (session) => {
+    if (session.panel === 'plesk') throw new UserError(`${session.conn?.id || 'This account'} is a Plesk account. Account backups are not available for Plesk accounts yet. Tell the user; do not try another way around it.`, 'PANEL_UNSUPPORTED');
+  };
+  const BACKUP_SECTIONS_HELP = 'Optional list of parts: ' + BACKUP_SECTIONS.join(', ') + '.';
+
+  add({
+    name: 'backup_list',
+    title: 'List the account\'s DirectAdmin backups',
+    description: 'Lists the backups of the account (DirectAdmin "Backup and Restore", stored in /backups of the account). With file=<name> it shows what that backup holds (website files, e-mail, FTP, databases...). Use this instead of asking the user to open DirectAdmin.',
+    inputSchema: schema({ domain: S('The account\'s main domain (default: detected).'), file: S('A backup file name from the list: show what it holds.') }),
+    annotations: READ,
+    async handler(args, ctx) {
+      notPlesk(ctx.session);
+      return backups.list(args, ctx);
+    },
+  });
+
+  add({
+    name: 'backup_create',
+    title: 'Create a DirectAdmin account backup',
+    description: 'Makes a full backup of the account in DirectAdmin (website files, e-mail, FTP, database settings and contents, trash) and waits until the backup file exists. Safe: it only adds a file in /backups of the account (it counts against the disk quota). Use it before risky changes; deploy/rollback keep their own smaller backups.',
+    inputSchema: schema({
+      domain: S('The account\'s main domain (default: detected).'),
+      sections: A(BACKUP_SECTIONS_HELP + ' Default: all.'),
+      domains: A('Domains to include (default: all domains of the account).'),
+      wait_seconds: N('How long to wait for the backup file (default 120, 0 = do not wait).', { minimum: 0, maximum: 600 }),
+    }),
+    annotations: WRITE_ONCE,
+    exclusive: true, // never two at once (a second call would make a second full backup)
+    async handler(args, ctx) {
+      notPlesk(ctx.session);
+      return backups.create(args, ctx);
+    },
+  });
+
+  add({
+    name: 'backup_restore',
+    title: 'Restore a DirectAdmin account backup',
+    description: 'Restores a backup of the account (website files, e-mail, FTP, database settings) from the list of backup_list. REPLACES the current data of the chosen sections, so: tell the user which backup and which sections will be replaced, get a clear yes, then call with the sections and confirm:true. A safety backup of the current state is ALWAYS made first (the restore does not start if that fails), so a restore can be undone. The restore runs in the background in DirectAdmin (about a minute): afterwards check the site with check_url and logs.',
+    inputSchema: schema(
+      {
+        file: S('Backup file name from backup_list.'),
+        confirm: B('Must be true, after the user agreed to replace the current data.'),
+        sections: A('The parts to restore, named one by one (backup_list file=<name> shows what the backup holds), for example ["domain"] for the website files only.'),
+        safety_wait_seconds: N('How long to wait for the safety backup (default 180).', { minimum: 1, maximum: 600 }),
+        domain: S('The account\'s main domain (default: detected).'),
+      },
+      ['file', 'sections', 'confirm'],
+    ),
+    annotations: DESTRUCTIVE,
+    exclusive: true,
+    async handler(args, ctx) {
+      notPlesk(ctx.session);
+      return backups.restore(args, ctx);
+    },
+  });
 
   // ---- Plesk-only tools (the panel's Node.js extension): they answer "not a Plesk account" for DirectAdmin accounts ----
   for (const def of pleskTools(pleskHelpers)) add(def);

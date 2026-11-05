@@ -1,7 +1,7 @@
 // The local sign-in page. It runs on the user's own computer (127.0.0.1, random port,
 // random path), so the password is typed into a page that never touches the chat.
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
 import { platform } from 'node:os';
 import { randomToken, UserError } from './util.js';
@@ -30,7 +30,7 @@ const STRINGS = {
     working: 'Connecting… this takes a few seconds.',
     doneTitle: 'Connected',
     doneText: 'You can close this tab and go back to your AI app. It can now work on your hosting account.',
-    what: 'DirectAdmin: the key can manage files, databases, PHP settings, logs, SSL, subdomains and cron jobs of this account. It cannot open the control panel, change your password or create other keys. You can remove it any time in DirectAdmin under Login Keys.',
+    what: 'DirectAdmin: the key can manage files, databases, PHP settings, logs, SSL, subdomains, cron jobs and account backups (create and restore) of this account. It cannot open the control panel, change your password or create other keys. You can remove it any time in DirectAdmin under Login Keys.',
     whatPleskPw: 'Plesk: Plesk gave no way to create a limited key, so the connector keeps your Plesk password in this computer\'s protected storage and uses it for every request. It has the same access as you have in Plesk, including changing your password. Ask your AI app to disconnect (or use the disconnect tool) to make it forget the password.',
     noticePlesk: 'Using Plesk? Plesk does not let a customer create a limited key, so the connector keeps your Plesk password in this computer\'s protected storage and uses it for every request. It then has the same access as you have in Plesk, including changing your password. You can make it forget the password any time (disconnect). With DirectAdmin nothing like that happens: only a restricted key is kept.',
     whatPlesk: 'Plesk: Plesk cannot restrict a key, so the key has the same rights as your Plesk login (without the password). It is kept only in this computer\'s protected storage, and Plesk support in this connector is still being completed. You can remove it any time: the disconnect tool deletes it in Plesk, or delete it there yourself.',
@@ -60,7 +60,7 @@ const STRINGS = {
     working: 'Γίνεται σύνδεση… θα πάρει λίγα δευτερόλεπτα.',
     doneTitle: 'Συνδέθηκε',
     doneText: 'Μπορείς να κλείσεις αυτή την καρτέλα και να γυρίσεις στο AI app σου. Πλέον μπορεί να δουλέψει στον λογαριασμό hosting σου.',
-    what: 'DirectAdmin: το κλειδί διαχειρίζεται αρχεία, βάσεις, ρυθμίσεις PHP, logs, SSL, subdomains και cron jobs αυτού του λογαριασμού. Δεν ανοίγει το panel, δεν αλλάζει τον κωδικό σου και δεν δημιουργεί άλλα κλειδιά. Μπορείς να το αφαιρέσεις όποτε θες από το DirectAdmin, στα Login Keys.',
+    what: 'DirectAdmin: το κλειδί διαχειρίζεται αρχεία, βάσεις, ρυθμίσεις PHP, logs, SSL, subdomains, cron jobs και backups (δημιουργία και επαναφορά) αυτού του λογαριασμού. Δεν ανοίγει το panel, δεν αλλάζει τον κωδικό σου και δεν δημιουργεί άλλα κλειδιά. Μπορείς να το αφαιρέσεις όποτε θες από το DirectAdmin, στα Login Keys.',
     whatPleskPw: 'Plesk: το Plesk δεν έδωσε τρόπο να δημιουργηθεί περιορισμένο κλειδί, οπότε ο connector κρατά τον κωδικό σου του Plesk στην προστατευμένη αποθήκη αυτού του υπολογιστή και τον χρησιμοποιεί σε κάθε αίτημα. Έχει την ίδια πρόσβαση με εσένα στο Plesk, και αλλαγή του κωδικού σου. Ζήτα από το AI app σου disconnect (ή χρησιμοποίησε το εργαλείο disconnect) για να ξεχάσει τον κωδικό.',
     noticePlesk: 'Χρησιμοποιείς Plesk; Το Plesk δεν αφήνει τον πελάτη να δημιουργήσει περιορισμένο κλειδί, οπότε ο connector κρατά τον κωδικό σου του Plesk στην προστατευμένη αποθήκη αυτού του υπολογιστή και τον χρησιμοποιεί σε κάθε αίτημα. Έχει τότε την ίδια πρόσβαση με εσένα στο Plesk, και αλλαγή του κωδικού σου. Μπορείς να τον κάνεις να ξεχάσει τον κωδικό όποτε θέλεις (disconnect). Στο DirectAdmin δεν γίνεται κάτι τέτοιο: κρατιέται μόνο ένα περιορισμένο κλειδί.',
     whatPlesk: 'Plesk: το Plesk δεν μπορεί να περιορίσει ένα κλειδί, οπότε το κλειδί έχει τα ίδια δικαιώματα με τη σύνδεσή σου στο Plesk (χωρίς τον κωδικό). Φυλάσσεται μόνο στην προστατευμένη αποθήκευση αυτού του υπολογιστή και η υποστήριξη Plesk στον connector ολοκληρώνεται ακόμη. Μπορείς να το αφαιρέσεις όποτε θες: το εργαλείο disconnect το διαγράφει στο Plesk, ή διαγράψ’ το εσύ εκεί.',
@@ -177,6 +177,25 @@ export function openInBrowser(url) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Puts text on the user's clipboard (never into the chat): the sign-in address holds the page's secret, so when the browser did not
+ * show the page the user pastes it themselves. Returns true when a clipboard program took it.
+ */
+export function copyToClipboard(text) {
+  if (process.env.KAPAWEB_CONNECTOR_NO_BROWSER === '1') return false;
+  const p = platform();
+  const candidates = p === 'win32' ? [['clip', []]] : p === 'darwin' ? [['pbcopy', []]] : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['--clipboard', '--input']]];
+  for (const [cmd, args] of candidates) {
+    try {
+      const r = spawnSync(cmd, args, { input: text, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, timeout: 3000 });
+      if (!r.error && r.status === 0) return true;
+    } catch {
+      /* try the next one */
+    }
+  }
+  return false;
 }
 
 /**
