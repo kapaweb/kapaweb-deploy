@@ -7,13 +7,13 @@
     "url": "https://github.com/kapaweb/kapaweb-deploy",
     "source": "github"
   },
-  "version": "0.9.0",
+  "version": "0.9.1",
   "websiteUrl": "https://kapaweb.gr/deploy-with-ai/",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/kapaweb/kapaweb-deploy/releases/download/v0.9.0/kapaweb-connector.mcpb",
-      "fileSha256": "3beb8beee8f2c4bcb919dab5fd10eae4a2553e853c2de467902e9dcf41144986",
+      "identifier": "https://github.com/kapaweb/kapaweb-deploy/releases/download/v0.9.1/kapaweb-connector.mcpb",
+      "fileSha256": "1c2a1fba392fb81d97339907589c4038fbaa535f4cd3a0466444b40a422d7625",
       "transport": {
         "type": "stdio"
       }
