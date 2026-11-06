@@ -1504,6 +1504,67 @@ export function buildTools() {
     },
   });
 
+  add({
+    name: 'backup_upload',
+    title: 'Carry a backup from this computer into the account\'s backups',
+    description: 'Puts a DirectAdmin backup file that is on THIS computer (for example one made on another server, or kept earlier) into /backups of the account, so that backup_restore can use it. Only adds a file: nothing is restored and an existing backup is never replaced. The panel must be able to read the file as a backup (it is checked, and removed again if not). The file must be a .tar.gz or .tar.zst, in an allowed folder of this computer (the project folder). Afterwards backup_list file=<name> shows what it holds.',
+    inputSchema: schema(
+      {
+        source: S('Absolute path of the backup file on this computer.'),
+        name: S('Name to give it in /backups (default: the file name). Letters, digits, dot, dash, underscore, ending in .tar.gz or .tar.zst.'),
+        domain: S('The account\'s main domain (default: detected).'),
+      },
+      ['source'],
+    ),
+    annotations: WRITE_ONCE,
+    exclusive: true,
+    async handler(args, ctx) {
+      notPlesk(ctx.session);
+      return backups.upload(args, ctx);
+    },
+  });
+
+  add({
+    name: 'backup_download',
+    title: 'Carry a backup of the account to this computer',
+    description: 'Saves one backup of the account (from backup_list) into a folder of THIS computer, for example to take it to another server with backup_upload. The file holds everything of the account, mail and database contents included: tell the user which backup goes to which folder, get a clear yes, then call with confirm:true. An existing local file is never replaced.',
+    inputSchema: schema(
+      {
+        file: S('Backup file name from backup_list.'),
+        folder: S('Absolute path of the folder on this computer (the project folder).'),
+        confirm: B('Must be true, after the user agreed.'),
+        domain: S('The account\'s main domain (default: detected).'),
+      },
+      ['file', 'folder', 'confirm'],
+    ),
+    annotations: WRITE_ONCE,
+    exclusive: true,
+    async handler(args, ctx) {
+      notPlesk(ctx.session);
+      return backups.download(args, ctx);
+    },
+  });
+
+  add({
+    name: 'backup_delete',
+    title: 'Remove a backup file of the account',
+    description: 'Removes one backup file (from backup_list) from /backups of the account. It goes to the account\'s trash, so it can be brought back in DirectAdmin. Careful: a safety backup made before a restore is the way back from that restore. Tell the user which file, get a clear yes, then call with confirm:true.',
+    inputSchema: schema(
+      {
+        file: S('Backup file name from backup_list.'),
+        confirm: B('Must be true, after the user agreed.'),
+        domain: S('The account\'s main domain (default: detected).'),
+      },
+      ['file', 'confirm'],
+    ),
+    annotations: DESTRUCTIVE,
+    exclusive: true,
+    async handler(args, ctx) {
+      notPlesk(ctx.session);
+      return backups.remove(args, ctx);
+    },
+  });
+
   // ---- Plesk-only tools (the panel's Node.js extension): they answer "not a Plesk account" for DirectAdmin accounts ----
   for (const def of pleskTools(pleskHelpers)) add(def);
   for (const def of pleskFileTools(pleskHelpers)) add(def);

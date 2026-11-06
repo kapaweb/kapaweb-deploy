@@ -7,10 +7,16 @@
 //   contents POST /CMD_SITE_BACKUP?json=yes  JSON {file, domain, json:'yes', action:'view'}  -> ["domain","email",...]  (what the file holds)
 //   create   POST /CMD_SITE_BACKUP?json=yes  JSON {select0..N, domain, json:'yes', action:'backup', form_version:'4', domains0..N}   -> 200, empty body
 //   restore  POST /CMD_SITE_BACKUP?json=yes  JSON {file, select0..N, domain, json:'yes', action:'restore', form_version:'3'}          -> 200, empty body
+//   upload   POST /api/filemanager-actions/upload (dir '/backups')  -> carries a backup made ELSEWHERE (another server) into this account
+//   download GET  /api/filemanager/download?path=/backups/<file>     -> carries a backup of this account to this computer
+//   delete   POST /api/filemanager-actions/remove (trash)            -> takes one backup file away again
 // Create and restore only QUEUE the job (DirectAdmin's task queue runs it within about a minute): a backup is proven by its name
 // appearing in the list, a restore has no completion signal in the panel's API, so the result says "queued" and the caller checks the site.
+import { basename, isAbsolute, resolve } from 'node:path';
+import { mkdir, open, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { UserError, limitOrZero } from './util.js';
-import { fmDiskUsage } from './fm.js';
+import { fmDiskUsage, fmList, fmMkdir, fmRemove, fmUpload, isNotFound } from './fm.js';
+import { assertLocalFileAllowed } from './local-guard.js';
 
 const CMD = '/CMD_SITE_BACKUP';
 /** Every part of an account the panel can back up (the checkboxes of its "Create Backup" form). */
@@ -32,6 +38,11 @@ const SECTION_HELP = {
   trash: 'deleted-trash data',
 };
 const FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$/;
+const BACKUPS_DIR = '/backups';
+/** A backup that is carried INTO an account: a plain name, and a compressed tar (the two kinds DirectAdmin makes). Its first bytes must say so too. */
+const UPLOAD_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.tar\.(gz|zst)$/i;
+const MAGIC = { gz: Buffer.from([0x1f, 0x8b]), zst: Buffer.from([0x28, 0xb5, 0x2f, 0xfd]) };
+const MB = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${Math.round((n / 1048576) * 10) / 10} MB`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const names = (body) => (Array.isArray(body) ? body.filter((x) => typeof x === 'string') : null);
@@ -142,19 +153,170 @@ export function daBackupOps(h) {
     };
   }
 
-  /** A backup is a whole copy of the account: refuse when the disk is nearly full, warn when it may not fit. Returns a warning text or ''. */
-  async function roomWarning(da) {
+  /** The disk quota of the account: null when it is unlimited (or not told). */
+  async function spaceInfo(da) {
     const cfg = (await da.get('/api/session/user-config')).body || {};
     const usage = (await da.get('/api/session/user-usage')).body || {};
-    if (usage.quotaBytes?.unlimited === true) return '';
+    if (usage.quotaBytes?.unlimited === true) return null;
     const limit = limitOrZero(cfg.quotaLim) * 1048576;
-    if (!limit) return '';
+    if (!limit) return null;
     const used = ((await fmDiskUsage(da, '/').catch(() => null)) || {}).sizeOnDiskBytes || 0;
-    const free = limit - used;
+    return { limit, used, free: limit - used };
+  }
+
+  /** A backup is a whole copy of the account: refuse when the disk is nearly full, warn when it may not fit. Returns a warning text or ''. */
+  async function roomWarning(da) {
+    const info = await spaceInfo(da);
+    if (!info) return '';
+    const { limit, used, free } = info;
     if (free < 20 * 1048576) {
-      throw new UserError(`Only ${Math.max(0, Math.round(free / 1048576))} MB of the ${Math.round(limit / 1048576)} MB disk quota are free: a backup would not fit. Free space first (old backups in /backups can be removed by the user in DirectAdmin), or ask the user about a larger package.`);
+      throw new UserError(`Only ${Math.max(0, Math.round(free / 1048576))} MB of the ${Math.round(limit / 1048576)} MB disk quota are free: a backup would not fit. Free space first (old backups can be removed with backup_delete), or ask the user about a larger package.`);
     }
     return free < used ? `Free disk space (${Math.round(free / 1048576)} MB) is smaller than the account's content (${Math.round(used / 1048576)} MB): the backup may not fit. Check it exists with backup_list before relying on it.` : '';
+  }
+
+  /** The file entry of a backup in /backups (null when there is none). Only a real file counts, never a folder or a link. */
+  async function backupEntry(da, file) {
+    try {
+      const e = (await fmList(da, BACKUPS_DIR)).entries.find((x) => x.name === file);
+      return e && e.type === 'file' ? e : null;
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+  }
+
+  /** Removes a file this tool made itself (an upload that failed its checks): it must not stay behind on the account. */
+  async function dropOwn(da, file) {
+    await fmRemove(da, [`${BACKUPS_DIR}/${file}`], { trash: false, tolerateMissing: true }).catch(() => {});
+  }
+
+  /**
+   * Carries a backup that was made on ANOTHER server (or earlier, and kept on this computer) into /backups of this account, so that
+   * backup_restore can use it. It only adds a file: nothing is restored and no existing backup is replaced. The panel itself must be
+   * able to read the file as a backup (its own "view"), otherwise the file is removed again and the caller is told.
+   */
+  async function upload(args, { session, progress = () => {} }) {
+    const source = reqString(args, 'source', { max: 1000 });
+    if (!isAbsolute(source)) throw new UserError('"source" must be an absolute path on this computer.');
+    const local = await realpath(resolve(source)).catch(() => resolve(source));
+    const st = await stat(local).catch(() => null);
+    if (!st || !st.isFile()) throw new UserError(`The file ${local} does not exist.`);
+    assertLocalFileAllowed(local);
+    const name = optString(args, 'name', { max: 130 }) || basename(local);
+    const m = UPLOAD_NAME_RE.exec(name);
+    if (!m) throw new UserError(`"${name}" is not a usable backup name: letters, digits, dot, dash and underscore only, ending in .tar.gz or .tar.zst. Pass name=<new name> to give the file a name like that.`);
+    const ext = m[1].toLowerCase();
+    const head = Buffer.alloc(4);
+    const fh = await open(local, 'r');
+    try {
+      await fh.read(head, 0, 4, 0);
+    } finally {
+      await fh.close();
+    }
+    if (!head.subarray(0, MAGIC[ext].length).equals(MAGIC[ext])) throw new UserError(`${basename(local)} does not look like a .tar.${ext} archive (its first bytes are not those of a ${ext === 'gz' ? 'gzip' : 'zstd'} file). Nothing was uploaded.`);
+    if (st.size < 1024) throw new UserError(`${basename(local)} is only ${st.size} bytes: that cannot be a backup. Nothing was uploaded.`);
+    const da = await session.da();
+    const domain = await mainDomain(args, da);
+    if (await backupEntry(da, name) || (await listNames(da, domain)).includes(name)) {
+      throw new UserError(`${name} already exists in /backups of this account; it is never replaced. Pass name=<another name>.`);
+    }
+    const info = await spaceInfo(da);
+    let warning = '';
+    if (info) {
+      if (info.free < st.size + 20 * 1048576) {
+        throw new UserError(`The backup is ${MB(st.size)} but only ${Math.max(0, Math.round(info.free / 1048576))} MB of the ${Math.round(info.limit / 1048576)} MB disk quota are free. Free space first (old backups can be removed with backup_delete), or ask the user about a larger package.`);
+      }
+      const after = info.free - st.size;
+      if (after < info.used) warning = `After this upload ${MB(after)} of disk quota are free, less than the account's content (${MB(info.used)}): the safety backup that backup_restore makes first may not fit. Free space before restoring.`;
+    }
+    if (!(await fmList(da, BACKUPS_DIR).then(() => true, (err) => (isNotFound(err) ? false : Promise.reject(err))))) await fmMkdir(da, BACKUPS_DIR);
+    progress(`Uploading ${name} (${MB(st.size)})…`);
+    const perm = 0o600; // a backup holds the whole account, mail and database contents included: only the owner may read it
+    if (da.fileApi === 'legacy') {
+      if (st.size > 200 * 1024 * 1024) throw new UserError('This older panel takes a file only through memory: at most 200 MB. Use Backup and Restore in DirectAdmin for a bigger one.');
+      await fmUpload(da, BACKUPS_DIR, name, await readFile(local), { overwrite: false, perm });
+    } else {
+      await da.uploadFile('POST', '/api/filemanager-actions/upload', {
+        fields: { dir: BACKUPS_DIR, name, overwrite: 'false', perm: String(perm) },
+        fileField: 'file',
+        fileName: name,
+        filePath: local,
+        onProgress: (sent, total) => progress(`Uploading ${name}: ${Math.round((sent / total) * 100)}%`),
+      });
+    }
+    const got = await backupEntry(da, name);
+    if (!got || got.size !== st.size) {
+      await dropOwn(da, name);
+      throw new UserError(`The upload of ${name} did not arrive complete (${got ? `${got.size} of ${st.size} bytes` : 'the file is not there'}). It was removed; try again.`);
+    }
+    // the upload's "200" proves nothing about the file: the panel must list it and be able to read it as a backup
+    let listed = false;
+    const until = Date.now() + (Number(process.env.KAPAWEB_CONNECTOR_LIST_WAIT_MS) > 0 ? Number(process.env.KAPAWEB_CONNECTOR_LIST_WAIT_MS) : 30000);
+    while (!listed) {
+      listed = (await listNames(da, domain)).includes(name);
+      if (listed || Date.now() > until) break;
+      await sleep(Math.min(pollMs(), 2000));
+    }
+    let inside = [];
+    if (listed) inside = await contents(da, domain, name).catch(() => []);
+    if (!listed || !inside.length) {
+      await dropOwn(da, name);
+      throw new UserError(listed
+        ? `The panel listed ${name} but could not read it as a backup (it may be damaged, made by another kind of DirectAdmin backup, or not for this account). The uploaded file was removed again; nothing was changed.`
+        : `The file arrived but DirectAdmin does not list ${name} as one of this account's backups (the panel only lists names it recognises). The uploaded file was removed again; nothing was changed.`);
+    }
+    return {
+      uploaded: name,
+      bytes: st.size,
+      contains: inside.map((s) => ({ section: s, what: SECTION_HELP[s] || s })),
+      ...(warning ? { warning } : {}),
+      note: 'Nothing was restored. backup_restore can now use it: tell the user exactly which parts it will REPLACE (e-mail, forwarders... never the website files unless wanted), get a clear yes, then call backup_restore with the sections and confirm:true.',
+    };
+  }
+
+  /** Carries a backup of this account to this computer (to take it to another server with backup_upload). */
+  async function download(args, { session, progress = () => {} }) {
+    const file = reqString(args, 'file', { max: 220, pattern: FILE_RE, what: 'is not a backup file name' });
+    if (args.confirm !== true) {
+      throw new UserError('A backup holds the whole account: website files, e-mail messages and database contents. Tell the user which backup goes to which folder of this computer; only after their clear yes call again with confirm:true.');
+    }
+    const folder = reqString(args, 'folder', { max: 1000 });
+    if (!isAbsolute(folder)) throw new UserError('"folder" must be an absolute path on this computer.');
+    const target = resolve(folder, file);
+    assertLocalFileAllowed(target);
+    if (await stat(target).catch(() => null)) throw new UserError(`${target} already exists on this computer; it is not replaced. Choose another folder.`);
+    const da = await session.da();
+    const domain = await mainDomain(args, da);
+    if (!(await listNames(da, domain)).includes(file)) throw new UserError(`${file} is not one of this account's backups (backup_list shows them).`);
+    const entry = await backupEntry(da, file);
+    if (!entry) throw new UserError(`${file} is not a regular file in /backups of this account.`);
+    await mkdir(resolve(folder), { recursive: true, mode: 0o700 });
+    progress(`Downloading ${file} (${MB(entry.size)})…`);
+    const r = await da.downloadToFile(`/api/filemanager/download?` + new URLSearchParams({ path: `${BACKUPS_DIR}/${file}` }), target, {
+      onProgress: (n) => progress(`Downloading ${file}: ${MB(n)} of ${MB(entry.size)}`),
+    });
+    if (r.storedBytes !== entry.size) {
+      await rm(target, { force: true });
+      throw new UserError(`The download of ${file} came to ${r.storedBytes} bytes, the panel lists ${entry.size}. It was removed; try again.`);
+    }
+    return { saved_as: target, bytes: entry.size, note: 'The file holds the whole account (mail and database contents too): keep it in the project folder, and move it to the Trash when it is no longer needed.' };
+  }
+
+  /** Takes one backup file out of /backups. It goes to the account's trash (File Manager), so it can be brought back. */
+  async function remove(args, { session }) {
+    const file = reqString(args, 'file', { max: 220, pattern: FILE_RE, what: 'is not a backup file name' });
+    if (args.confirm !== true) {
+      throw new UserError('Deleting a backup can take away the only way back (a safety backup made before a restore is a backup too). Tell the user which backup file will be removed from /backups; only after their clear yes call again with confirm:true.');
+    }
+    const da = await session.da();
+    if (da.fileApi === 'legacy') throw new UserError('This older panel has no trash, so a removal would be final: ask the user to remove the backup in DirectAdmin (Backup and Restore).');
+    const domain = await mainDomain(args, da);
+    if (!(await listNames(da, domain)).includes(file)) throw new UserError(`${file} is not one of this account's backups (backup_list shows them).`);
+    if (!(await backupEntry(da, file))) throw new UserError(`${file} is not a regular file in /backups of this account.`);
+    await fmRemove(da, [`${BACKUPS_DIR}/${file}`], { trash: true });
+    if (await backupEntry(da, file)) throw new UserError(`The panel said ${file} was removed but it is still in /backups. Look with backup_list.`);
+    return { removed: file, note: 'The file was moved to the trash of the account (DirectAdmin File Manager, Trash): it can be brought back from there until the trash is emptied.' };
   }
 
   async function restore(args, { session, progress }) {
@@ -198,5 +360,5 @@ export function daBackupOps(h) {
     };
   }
 
-  return { list, create, restore };
+  return { list, create, restore, upload, download, remove };
 }
