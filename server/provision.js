@@ -106,14 +106,14 @@ export async function provision(input) {
 }
 
 /** The Plesk side of provision(): see provision-plesk.js. The expiry choice is the same list as for DirectAdmin. */
-async function exchangePlesk({ username, password, expiry = 30, ipLock = false, keepPassword = true, adopt }, target) {
+async function exchangePlesk({ username, password, expiry = 365, ipLock = false, keepPassword = true, adopt }, target) {
   if (!password) throw new UserError('Enter the password.');
   redactor.add(password); // if a panel message ever echoes it, it is scrubbed before it reaches the AI or a log
   if (!Object.hasOwn(EXPIRY_CHOICES, String(expiry))) throw new UserError('Choose how long the key should last.');
   return provisionPlesk({ host: target.host, port: target.port, pinnedIp: target.pinnedIp, username: String(username || '').trim(), password, days: EXPIRY_CHOICES[String(expiry)], ipLock, keepPassword: keepPassword !== false, adopt });
 }
 
-async function exchange({ address, username, password, otp, expiry = 30, ipLock = false, adopt, verifyOpts }) {
+async function exchange({ address, username, password, otp, expiry = 365, ipLock = false, adopt, verifyOpts }) {
   if (!username || !/^[a-z0-9_.-]{1,32}$/i.test(username)) throw new UserError('Enter the DirectAdmin username from your welcome e-mail.');
   if (!password) throw new UserError('Enter the password.');
   redactor.add(password); // if a panel message ever echoes it, it is scrubbed before it reaches the AI or a log
