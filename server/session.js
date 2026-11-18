@@ -258,6 +258,12 @@ export class AccountSession {
       );
     }
     let da = this.m._das.get(conn.id);
+    if (da?.networkFailed) {
+      // The last request could not reach the panel. The client is pinned to the address it was created with, which may be
+      // the reason (the name now resolves differently, or it was an address this computer cannot reach): start over.
+      this.m._das.delete(conn.id);
+      da = null;
+    }
     if (!da) {
       const key = await this.store.getSecret(secretName(conn, 'key'));
       if (!key) {

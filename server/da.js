@@ -75,9 +75,12 @@ export async function verifyPanelHost(host, o) {
   }
   const addrs = await dnsAddresses(h, o?.lookupFn);
   if (addrs.length === 0) throw new UserError(`Could not resolve ${host}. Check the address and your internet connection.`);
-  const hit = addrs.find((a) => known.has(a));
-  if (!hit) throw new UserError(refusalMessage(host));
-  return hit;
+  const hits = addrs.filter((a) => known.has(a));
+  if (hits.length === 0) throw new UserError(refusalMessage(host));
+  // A server can have an A and an AAAA record (ns3.backorder.gr does). A computer with no IPv6 route fails every request
+  // to the AAAA address with EHOSTUNREACH, and the pinned address is kept for the life of the client, so IPv4 wins
+  // whenever the name has one; an IPv6-only server still works.
+  return hits.find((a) => isIP(a) === 4) || hits[0];
 }
 
 /** "https://ssd5.kdns.gr:2222/evo/" or "ssd5.kdns.gr" -> { host, port }. Shape only: whether it IS a kapaweb server is verifyPanelHost's job. */
@@ -194,6 +197,7 @@ export class DaClient {
     if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/i.test(String(code))) {
       return new UserError('The hosting panel presented a certificate that could not be verified, so the connection was refused for safety. Check the panel address.');
     }
+    this.networkFailed = true; // the session drops this client, so the next call looks the panel up again instead of reusing a pinned address that no longer works
     return new UserError(`Could not reach the hosting panel (${code || err?.message || 'network error'}). Check the internet connection.`);
   }
 
@@ -239,13 +243,15 @@ export class DaClient {
       // only a run of them does.
       this.redirects += 1;
       if (this.redirects >= 3) this.authFailed = true;
-      throw new DaError(
+      const redirect = new DaError(
         401,
         'UNAUTHORIZED',
         'The panel redirected to its login page: it did not accept the login key for this command (the key may have expired or been revoked, or the command is outside what the key may do). If several commands fail like this, ask the user to run `connect` again.',
         undefined,
         path,
       );
+      redirect.redirected = true; // lets a caller tell "no such path on this panel" (ssl-classic.js) from a real 401
+      throw redirect;
     }
     if (res.statusCode < 300) this.redirects = 0;
     const raw = Buffer.concat(chunks);
@@ -457,6 +463,7 @@ export class DaClient {
       if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(String(code))) {
         throw new UserError('The hosting panel presented a certificate that could not be verified, so the connection was refused for safety. Check the panel address.');
       }
+      this.networkFailed = true;
       throw new UserError(`Could not reach the hosting panel (${code || err?.message || 'network error'}). Check the internet connection.`);
     }
     const ctype = res.headers.get('content-type') || '';
@@ -467,13 +474,15 @@ export class DaClient {
     if (res.status >= 300 && res.status < 400) {
       this.redirects += 1;
       if (this.redirects >= 3) this.authFailed = true;
-      throw new DaError(
+      const redirect = new DaError(
         401,
         'UNAUTHORIZED',
         'The panel redirected to its login page: it did not accept the login key for this command (the key may have expired or been revoked, or the command is outside what the key may do). If several commands fail like this, ask the user to run `connect` again.',
         undefined,
         path,
       );
+      redirect.redirected = true; // lets a caller tell "no such path on this panel" (ssl-classic.js) from a real 401
+      throw redirect;
     }
     if (res.status < 300) this.redirects = 0;
     const text = await res.text();

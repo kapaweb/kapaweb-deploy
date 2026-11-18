@@ -41,6 +41,7 @@ import { pleskDbHandlers } from './tools-plesk-db.js';
 import { pleskFileTools, pleskSiteHandlers } from './tools-plesk-files.js';
 import { LIST_MAX, LIST_SORTS, LIST_TYPES, pageList } from './list-page.js';
 import { configDir } from './store.js';
+import { absentTlsApi, classicDryRun, classicIssue, classicStatus } from './ssl-classic.js';
 
 /** Shown in account_info: an AI app's own safety check (Claude Code auto mode) may block a write to the live hosting. */
 const WRITE_BLOCK_HINT = 'Not an error of the connector: if your app blocks a write to this hosting, stop, say so in one sentence, do not retry or look for another way, and show the user their options (playbook section 17). Before the first change, tell the user what will change and get a clear yes.';
@@ -315,11 +316,32 @@ export function buildTools() {
     }
     return { status: 'still_waiting', seconds_waited: seconds, next: 'The user has not finished yet. Call account_info with wait_seconds=45 again (for up to 15 minutes in all); do not ask them to tell you when they are done.' };
   }
-  /** The SSL tools use the new API's TLS endpoints, which an older panel does not have. */
+  /**
+   * The SSL tools use the panel's TLS API (/api/domain-tls). An older panel (no new File Manager API) has neither it nor a
+   * workaround here. A panel with the new File Manager API but WITHOUT /api/domain-tls (kapaweb's ns65 and ssd5, 12/11/2026:
+   * the path answers a login redirect on GET and 405 on POST) is served by ssl-classic.js through the classic CMD_API_SSL.
+   */
   const sslDa = async (session) => {
     const da = await session.da();
     if (da.fileApi === 'legacy') throw new UserError('This hosting panel runs an older DirectAdmin without the API these SSL tools use. Tell the user to check or renew the certificate on the SSL page in DirectAdmin; do not look for a workaround.');
     return da;
+  };
+  /** What the classic path needs: the account's own domains and its server address, read from the panel. */
+  const classicContext = async (da) => {
+    const cfg = (await da.get('/api/session/user-config')).body || {};
+    return { da, allowed: accountDomains(cfg), serverIp: cfg.ip };
+  };
+  /** Does this panel serve the TLS API for the domain? Asked with a harmless GET and remembered for this connection. */
+  const tlsApiPresent = async (da, domain) => {
+    if (da.tlsApi) return da.tlsApi === 'api';
+    try {
+      await da.get(`/api/domain-tls/${encodeURIComponent(domain)}/certs`);
+      da.tlsApi = 'api';
+    } catch (err) {
+      if (!absentTlsApi(err)) throw err;
+      da.tlsApi = 'classic';
+    }
+    return da.tlsApi === 'api';
   };
 
   // ---- guidance & connection ------------------------------------------------
@@ -1283,37 +1305,63 @@ export function buildTools() {
   add({
     name: 'ssl_status',
     title: 'Certificates of a domain',
-    description: 'Lists the domain\'s TLS certificates and the DNS names that still have none. A new domain gets a free Let\'s Encrypt certificate only after its DNS points to this server.',
+    description: 'Lists the domain\'s TLS certificates and the DNS names that still have none. A new domain gets a free Let\'s Encrypt certificate only after its DNS points to this server. On a panel without the TLS API (ns65, ssd5) it shows instead what visitors really get on https for the domain and www (name, issuer, expiry, trusted or not), checked from this computer.',
     inputSchema: schema({ domain: S('The domain.') }, ['domain']),
     annotations: READ,
     async handler(args, { session }) {
       const domain = reqDomain(args);
-      return truncate(pretty((await (await sslDa(session)).get(`/api/domain-tls/${encodeURIComponent(domain)}/certs`)).body), 20000);
+      const da = await sslDa(session);
+      if (da.tlsApi !== 'classic') {
+        try {
+          const body = (await da.get(`/api/domain-tls/${encodeURIComponent(domain)}/certs`)).body;
+          da.tlsApi = 'api';
+          return truncate(pretty(body), 20000);
+        } catch (err) {
+          if (!absentTlsApi(err)) throw err;
+          da.tlsApi = 'classic';
+        }
+      }
+      return classicStatus({ ...(await classicContext(da)), domain });
     },
   });
 
   add({
     name: 'ssl_dry_run',
     title: 'Why would issuing a certificate fail?',
-    description: 'Simulates issuing the certificate and lists what would fail (dnsNamesFailedChallenge = names whose DNS does not point here yet). Changes nothing.',
+    description: 'Simulates issuing the certificate and lists what would fail (dnsNamesFailedChallenge = names whose DNS does not point here yet). Changes nothing. On a panel without the TLS API (ns65, ssd5) the check is made from this computer: DNS of the name and of www, the web server\'s answer for a challenge path, CAA records.',
     inputSchema: schema({ domain: S('The domain.') }, ['domain']),
     annotations: READ,
     async handler(args, { session }) {
       const domain = reqDomain(args);
-      return (await (await sslDa(session)).postJson(`/api/domain-tls/${encodeURIComponent(domain)}/provision-certs-dry-run`, {})).body;
+      const da = await sslDa(session);
+      if (da.tlsApi !== 'classic') {
+        try {
+          const body = (await da.postJson(`/api/domain-tls/${encodeURIComponent(domain)}/provision-certs-dry-run`, {})).body;
+          da.tlsApi = 'api';
+          return body;
+        } catch (err) {
+          if (!absentTlsApi(err)) throw err;
+          da.tlsApi = 'classic';
+        }
+      }
+      return classicDryRun({ ...(await classicContext(da)), domain });
     },
   });
 
   add({
     name: 'ssl_issue',
     title: 'Issue the free certificate',
-    description: 'Issues the Let\'s Encrypt certificate for the domain. Run ssl_dry_run first; DNS must point to this server.',
-    inputSchema: schema({ domain: S('The domain.') }, ['domain']),
+    description: 'Issues the Let\'s Encrypt certificate for the domain. Run ssl_dry_run first; DNS must point to this server. On a panel without the TLS API (ns65, ssd5) the certificate is requested with the classic panel command, and the result is checked with a real TLS handshake (visitors_get_it); a domain that already has a valid certificate is left alone.',
+    inputSchema: schema({ domain: S('The domain.'), wait_seconds: N('Panels without the TLS API only: how long to wait for the new certificate to be served (default 90, 0 = do not wait).', { minimum: 0, maximum: 300 }) }, ['domain']),
     annotations: WRITE,
-    async handler(args, { session }) {
+    async handler(args, { session, progress = () => {} }) {
       const domain = reqDomain(args);
-      const r = await (await sslDa(session)).postJson(`/api/domain-tls/${encodeURIComponent(domain)}/provision-certs`, {}, { timeoutMs: 180000 });
-      return r.body && Object.keys(r.body).length ? r.body : { requested: domain, next: 'Check with ssl_status in a minute.' };
+      const da = await sslDa(session);
+      if (await tlsApiPresent(da, domain)) {
+        const r = await da.postJson(`/api/domain-tls/${encodeURIComponent(domain)}/provision-certs`, {}, { timeoutMs: 180000 });
+        return r.body && Object.keys(r.body).length ? r.body : { requested: domain, next: 'Check with ssl_status in a minute.' };
+      }
+      return classicIssue({ ...(await classicContext(da)), domain, waitSeconds: optInt(args, 'wait_seconds', 90, { min: 0, max: 300 }), progress });
     },
   });
 
