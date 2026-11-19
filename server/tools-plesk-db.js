@@ -2,7 +2,8 @@
 // tools.js hands a Plesk account to these). MySQL/MariaDB proven on a real Plesk; PostgreSQL uses the same calls (not yet run for
 // real: the test server's PostgreSQL service is off).
 import { mkdir, open, stat } from 'node:fs/promises';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
+import { checkedDumpFile, createLocalTarget } from './local-guard.js';
 import { PleskDb, namePrefix, strongPassword } from './plesk-db.js';
 import { PleskFiles, resolveWebspace } from './plesk-files.js';
 import { UserError } from './util.js';
@@ -28,16 +29,17 @@ export function pleskDbHandlers(h) {
   const domainOf = (args) => optString(args, 'domain', { max: 253 });
 
   async function exportTo(db, row, { folder, progress }) {
-    let dir;
+    const name = `db-${row.name}-${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}.sql.zip`;
+    let file;
     if (folder) {
-      if (!isAbsolute(folder)) throw new UserError('"folder" must be an absolute path on this computer.');
-      dir = resolve(folder);
+      // a folder the AI named is checked like every download target, as typed and as it really is
+      file = await createLocalTarget(folder, name);
     } else {
-      dir = join(configDir(), 'exports');
+      const dir = join(configDir(), 'exports');
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      if (!(await stat(dir)).isDirectory()) throw new UserError(`${dir} is not a folder.`);
+      file = join(dir, name);
     }
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    if (!(await stat(dir)).isDirectory()) throw new UserError(`${dir} is not a folder.`);
-    const file = join(dir, `db-${row.name}-${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}.sql.zip`);
     const started = Date.now();
     const r = await db.exportDump(row, file, { progress });
     return {
@@ -97,8 +99,9 @@ export function pleskDbHandlers(h) {
       if (clean && !optBool(args, 'confirm_clean', false)) {
         throw new UserError('clean:true empties the database first and destroys its current data. Ask the user; only after they agree call again with confirm_clean:true (the connector then saves an export of the current data first).');
       }
-      const file = resolve(reqString(args, 'file'));
-      if (!/\.(sql(\.gz)?|zip)$/i.test(file)) throw new UserError('The dump must be a .sql, .sql.gz or .zip file.');
+      if (!/\.(sql(\.gz)?|zip)$/i.test(resolve(reqString(args, 'file')))) throw new UserError('The dump must be a .sql, .sql.gz or .zip file.');
+      // like every file that leaves this computer: not from hidden, system or other people's folders, nor another account's export
+      const file = await checkedDumpFile(reqString(args, 'file'), database);
       const st = await stat(file).catch(() => null);
       if (!st || !st.isFile()) throw new UserError(`The file ${file} does not exist.`);
       if (st.size === 0) throw new UserError(`${basename(file)} is empty.`);

@@ -1,7 +1,8 @@
 // Shared helpers: errors, random secrets, redaction, small validators.
 import { randomBytes, randomInt } from 'node:crypto';
+import { lstat, rm } from 'node:fs/promises';
 
-export const VERSION = '0.9.4';
+export const VERSION = '0.9.5';
 export const PLAYBOOK_URL = 'https://kapaweb.gr/deploy-with-ai/playbook.md';
 
 /** An error whose message is meant to be read by the AI (and the user) verbatim. */
@@ -252,6 +253,34 @@ export function normalizeDomain(raw, name = 'domain') {
 
 export function pretty(value) {
   return JSON.stringify(value, null, 2);
+}
+
+/**
+ * Makes room for the temporary "<file>.part" of a download, which is then created with flag 'wx' (it must not exist).
+ * A leftover of an earlier download that was cut off is removed; anything else is refused: a symbolic link (the download would be
+ * written THROUGH it into another file), a folder, or a file of another user of this computer (in a shared folder such as /tmp it was
+ * planted there to receive the download).
+ */
+export async function clearStalePart(part) {
+  let st;
+  try {
+    st = await lstat(part);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+  if (st.isSymbolicLink()) throw new UserError(`${part} is a symbolic link, not a leftover of an earlier download, so nothing was downloaded. Remove it or choose another folder.`);
+  if (!st.isFile()) throw new UserError(`${part} already exists and is not a file, so nothing was downloaded. Remove it or choose another folder.`);
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+    throw new UserError(`${part} belongs to another user of this computer, so nothing was downloaded. Choose a folder of your own, not a shared one such as /tmp.`);
+  }
+  await rm(part);
+}
+
+/** An error of this computer's own disk (as opposed to the network): set on errors of local file streams before they are reported. */
+export function markLocal(err) {
+  if (err && typeof err === 'object') err.kwLocal = true;
+  return err;
 }
 
 /**

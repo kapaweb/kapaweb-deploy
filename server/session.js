@@ -258,9 +258,13 @@ export class AccountSession {
       );
     }
     let da = this.m._das.get(conn.id);
+    let latch = null;
     if (da?.networkFailed) {
       // The last request could not reach the panel. The client is pinned to the address it was created with, which may be
       // the reason (the name now resolves differently, or it was an address this computer cannot reach): start over.
+      // What the old client learnt about the KEY is not a network matter and stays: a key the panel refused is not tried again
+      // (repeated refusals can get the user's IP blocked), and a run of login redirects keeps counting.
+      latch = { authFailed: da.authFailed === true, redirects: da.redirects || 0 };
       this.m._das.delete(conn.id);
       da = null;
     }
@@ -275,6 +279,10 @@ export class AccountSession {
       // (verifyPanelHost's own message already distinguishes "not a kapaweb server" from "could not resolve it right now".)
       const pinnedIp = await verifyPanelHost(conn.panelHost, this.m.verifyOpts);
       da = makeClient(conn, key, pinnedIp);
+      if (latch) {
+        if (latch.authFailed) da.authFailed = true;
+        da.redirects = latch.redirects;
+      }
       this.m._das.set(conn.id, da);
     }
     return da;

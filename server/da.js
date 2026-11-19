@@ -1,17 +1,17 @@
 // DirectAdmin HTTP client. Basic auth (user:login key) for normal use, a session
 // cookie only during the one-time setup. Never logs or returns credentials.
 import { randomBytes } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { rename, rm, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { open, rename, rm, stat } from 'node:fs/promises';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { isIP } from 'node:net';
-import { Readable, Transform } from 'node:stream';
+import { Readable, Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { knownServerIps } from './servers.js';
-import { UserError, VERSION, redactor } from './util.js';
+import { UserError, VERSION, clearStalePart, markLocal, redactor } from './util.js';
 
 export const DEFAULT_PORT = 2222;
 
@@ -123,6 +123,33 @@ export function connectTarget(host, port, pinnedIp) {
   return { https: true, connectHost: pinnedIp, connectPort: port, hostHeader: `${host}:${port}`, servername: host, uploadHost: host, uploadPort: port };
 }
 
+/**
+ * A Writable onto an already opened file. Errors of the disk are marked as local (markLocal) right where they happen, so that a
+ * failed write is never taken for a network failure (and a network failure that ends the stream is never taken for a disk error).
+ */
+export function fileSink(fh) {
+  const local = (e) => markLocal(Object.assign(e instanceof Error ? e : new Error(String(e)), { kwWrite: true }));
+  return new Writable({
+    async write(chunk, _enc, cb) {
+      try {
+        let off = 0;
+        while (off < chunk.length) off += (await fh.write(chunk, off, chunk.length - off)).bytesWritten;
+        cb();
+      } catch (e) {
+        cb(local(e));
+      }
+    },
+    async final(cb) {
+      try {
+        await fh.close();
+        cb();
+      } catch (e) {
+        cb(local(e));
+      }
+    },
+  });
+}
+
 /** A small Headers-like read of Node's raw response headers, for the few callers that need it (set-cookie, content-type). */
 function headerReader(raw) {
   return {
@@ -201,6 +228,12 @@ export class DaClient {
     return new UserError(`Could not reach the hosting panel (${code || err?.message || 'network error'}). Check the internet connection.`);
   }
 
+  /** A problem of this computer's own disk while a transfer ran: not a network failure, so the client is kept as it is. */
+  static localError(err, file) {
+    if (err?.code === 'ENOSPC') return new UserError('This computer has no space left for the download.');
+    return new UserError(`Could not ${err?.kwWrite ? 'write' : 'read'} the file ${file} on this computer (${err?.code || err?.message || 'error'}). Nothing was changed on the hosting account by this.`);
+  }
+
   /**
    * Sends one request to the PINNED panel address and resolves as soon as the response headers are in (the body is not read).
    * `writeBody(req)` streams a request body; it must end the request, and it never rejects: a problem while sending is
@@ -226,6 +259,9 @@ export class DaClient {
       const res = await answered;
       return { req, res, sent: async () => { await sending; return sendError; } };
     } catch (err) {
+      // a local file that could not be read while it was being sent ends the request too: that is not the network's fault
+      await Promise.race([sending, new Promise((r) => setTimeout(r, 2000).unref())]);
+      if (sendError?.kwLocal) throw DaClient.localError(sendError, sendError.path || 'being sent');
       throw this.#networkError(err, path, req);
     }
   }
@@ -382,15 +418,27 @@ export class DaClient {
         cb(null, chunk);
       },
     });
+    // "<dest>.part" is created new ('wx': never an existing file, never through a symbolic link): in a shared folder another user
+    // could otherwise have planted it, mode 0666 or as a link, and received the download
     const part = `${dest}.part`;
+    let fh;
     try {
-      await pipeline(res, meter, ...(gzip ? [createGzip({ level: 6 })] : []), createWriteStream(part, { flags: 'w', mode: 0o600 }));
-      if (!res.complete) throw new Error('The answer ended before it was complete.');
-      await rename(part, dest);
+      await clearStalePart(part);
+      fh = await open(part, 'wx', 0o600); // O_CREAT|O_EXCL: fails on any existing name, a symbolic link included
     } catch (err) {
-      await rm(part, { force: true });
-      if (err?.code === 'ENOSPC') throw new UserError('This computer has no space left for the download.');
-      throw err instanceof UserError ? err : this.#networkError(err, path, req);
+      res.destroy();
+      throw err instanceof UserError ? err : DaClient.localError(markLocal(Object.assign(err, { kwWrite: true })), part);
+    }
+    try {
+      await pipeline(res, meter, ...(gzip ? [createGzip({ level: 6 })] : []), fileSink(fh));
+      if (!res.complete) throw new Error('The answer ended before it was complete.');
+      await rename(part, dest).catch((e) => Promise.reject(markLocal(Object.assign(e, { kwWrite: true }))));
+    } catch (err) {
+      await fh.close().catch(() => {});
+      await rm(part, { force: true }).catch(() => {}); // ours: created above with O_EXCL
+      if (err instanceof UserError) throw err;
+      if (err?.kwLocal) throw DaClient.localError(err, dest);
+      throw this.#networkError(err, path, req);
     }
     return { bytes, storedBytes: (await stat(dest)).size, tail: tail.toString('latin1') };
   }
@@ -423,7 +471,9 @@ export class DaClient {
         async function* body() {
           yield headBuf;
           let n = 0;
-          for await (const chunk of createReadStream(filePath)) {
+          // a read error of the local file is marked as such where it happens (it is not a network failure)
+          const source = createReadStream(filePath).on('error', (e) => markLocal(e));
+          for await (const chunk of source) {
             n += chunk.length;
             sent += chunk.length;
             if (onProgress && Date.now() - lastReport > 2000) {
@@ -440,7 +490,11 @@ export class DaClient {
     });
     const chunks = await this.#readAll(res, path, req);
     const sendError = await sendDone();
-    if (sendError && res.statusCode < 400) throw sendError instanceof UserError ? sendError : this.#networkError(sendError, path, req);
+    if (sendError && res.statusCode < 400) {
+      if (sendError instanceof UserError) throw sendError;
+      if (sendError.kwLocal) throw DaClient.localError(sendError, filePath);
+      throw this.#networkError(sendError, path, req);
+    }
     return this.#interpret(res, chunks, {}, path);
   }
 
@@ -485,7 +539,27 @@ export class DaClient {
       throw redirect;
     }
     if (res.status < 300) this.redirects = 0;
-    const text = await res.text();
+    // read with the same cap as every other answer: a hostile panel must not fill this computer's memory through an upload's reply
+    const limit = opts.maxBytes ? opts.maxBytes + 1 : MAX_BODY_BYTES;
+    const chunks = [];
+    let n = 0;
+    try {
+      if (res.body) {
+        for await (const c of res.body) {
+          n += c.length;
+          if (n > limit) {
+            // leaving the loop cancels the stream: the rest is not read
+            throw new UserError(`The panel's answer to ${path.split('?')[0]} is larger than ${(limit / 1048576).toFixed(1)} MB, more than the connector reads into memory.`);
+          }
+          chunks.push(Buffer.from(c));
+        }
+      }
+    } catch (err) {
+      if (err instanceof UserError) throw err;
+      this.networkFailed = true;
+      throw new UserError(`Could not reach the hosting panel (${err?.cause?.code || err?.code || err?.message || 'network error'}). Check the internet connection.`);
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
     let payload = text;
     if (/json/i.test(ctype) && text) {
       try {

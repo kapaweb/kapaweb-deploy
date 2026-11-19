@@ -114,20 +114,36 @@ class WindowsStore {
   }
 }
 
-class MacStore {
+/** The command line `security -i` reads on stdin to store a secret: the value as hex (-X), so it needs no quoting and never appears in argv. */
+export function macAddCommand(name, value) {
+  if (!/^[A-Za-z0-9:@._-]{1,300}$/.test(name)) return null; // only plain item names go through the interactive line (no quoting needed)
+  return `add-generic-password -U -a ${name} -s ${SERVICE} -X ${Buffer.from(value, 'utf8').toString('hex')}\n`;
+}
+
+export class MacStore {
   name = 'macOS Keychain';
+  /** @param {typeof run} [runner] tests only */
+  constructor(runner = run) {
+    this.run = runner;
+  }
   async set(name, value) {
-    // NOTE: `security` only accepts the password as an argument, so it is briefly
-    // visible to other processes of the same user. Documented limitation.
-    const r = await run('security', ['add-generic-password', '-U', '-a', name, '-s', SERVICE, '-w', value]);
+    // The secret is NOT put on the command line (where `ps` shows it to other processes for a moment): `security -i` reads the command
+    // from stdin, with the value hex-encoded (-X). The stored value is read back; if this way did not store it exactly (an older
+    // `security`), the plain argument form is used as before.
+    const line = macAddCommand(name, value);
+    if (line) {
+      const r = await this.run('security', ['-i'], line).catch(() => null);
+      if (r && (await this.get(name).catch(() => null)) === value) return;
+    }
+    const r = await this.run('security', ['add-generic-password', '-U', '-a', name, '-s', SERVICE, '-w', value]);
     if (r.code !== 0) throw new Error('keychain write failed');
   }
   async get(name) {
-    const r = await run('security', ['find-generic-password', '-a', name, '-s', SERVICE, '-w']);
+    const r = await this.run('security', ['find-generic-password', '-a', name, '-s', SERVICE, '-w']);
     return r.code === 0 ? r.out.replace(/\n$/, '') : null;
   }
   async delete(name) {
-    await run('security', ['delete-generic-password', '-a', name, '-s', SERVICE]);
+    await this.run('security', ['delete-generic-password', '-a', name, '-s', SERVICE]);
   }
 }
 

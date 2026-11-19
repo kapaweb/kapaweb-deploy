@@ -25,6 +25,32 @@ const DATA_FOLDER = /^(uploads|storage|media|files|cache)$/i;
 const EXCLUDE_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '.idea', '.vscode', '__macosx', '.github', '.ssh', '.claude', '.cursor', 'secrets', 'secret', '.secrets', '.terraform']);
 const SOFT_EXCLUDE_FILES = [/^\.DS_Store$/, /^Thumbs\.db$/i, /^desktop\.ini$/i, /~$/, /\.(swp|swo|bak|old|orig|tmp|log)$/i, /^npm-debug\.log/, /\.(sql|sqlite|sqlite3)(\.gz)?$/i];
 const STORED_EXT = /\.(jpe?g|png|gif|webp|avif|zip|gz|tgz|bz2|7z|rar|woff2?|mp4|webm|mov|mp3|ogg|pdf)$/i;
+// Whole-account and whole-site backups are NEVER published, whatever force_include says: a DirectAdmin backup holds every mailbox, the
+// database contents and the account's password hashes, and its name is predictable (backup-<Mon>-<DD>-<YYYY>-<n>.tar.zst), so a backup
+// kept in the deployed folder would be one deploy away from a public, guessable URL.
+const BACKUP_ARCHIVE_NAMES = [
+  /^backup-.*\.tar(\.[a-z0-9]{1,4})?$/i, // DirectAdmin user level: backup-Nov-05-2026-1.tar.zst
+  /^user\.[^.]+\.[^.]+\.tar(\.[a-z0-9]{1,4})?$/i, // DirectAdmin admin/reseller level: user.admin.name.tar.gz
+  /\.tar\.zst$/i,
+  /\.tar$/i,
+  /\.(wpress|jpa)$/i, // All-in-One WP Migration, Akeeba
+];
+const ARCHIVE_EXT = /\.(zip|tar|tgz|gz|zst|bz2|xz|7z|rar)$/i;
+const BACKUP_WORD = /(^|[^a-z])(backups?|bak|dump|snapshot)([^a-z]|$)/i;
+const BACKUP_LIKE_MIN_BYTES = 1024 * 1024; // an archive called "...backup..." above this size is treated as a backup too
+
+/** Is this file an account or site backup that deploy must leave out? (size only matters for the "backup-like name" rule) */
+export function isBackupArchive(name, size = Infinity) {
+  if (BACKUP_ARCHIVE_NAMES.some((re) => re.test(name))) return true;
+  return ARCHIVE_EXT.test(name) && BACKUP_WORD.test(name) && size > BACKUP_LIKE_MIN_BYTES;
+}
+
+/** The warning deploy gives when it left backups out (null when it did not). */
+export function backupArchiveWarning(skipped) {
+  const list = skipped?.backups || [];
+  if (!list.length) return null;
+  return `Left out ${list.length} backup archive(s) (${list.slice(0, 5).join(', ')}${list.length > 5 ? ', ...' : ''}): a backup holds every mailbox, the database contents and password hashes, so deploy never publishes one. Move ${list.length === 1 ? 'it' : 'them'} OUT of the folder that is deployed (for example to a backups folder next to the project).`;
+}
 // every file below 1 MB is scanned, whatever its name or extension (a key can sit in "logo.png" or "notes.txt")
 const SCAN_MAX_BYTES = 1024 * 1024;
 // names of web content: judged by their content, not by a name such as "credentials.html" or "id_rsa.pub"
@@ -143,7 +169,7 @@ export async function collectFiles(root, { exclude = [], forceInclude = [] } = {
   const forced = matcher(forceInclude);
   const files = [];
   const emptyDirs = [];
-  const skipped = { secrets: [], soft: [], excluded: [], dirs: [], symlinks: [] };
+  const skipped = { secrets: [], soft: [], excluded: [], dirs: [], symlinks: [], backups: [] };
   const flagged = [];
   let htaccess = null;
 
@@ -170,6 +196,11 @@ export async function collectFiles(root, { exclude = [], forceInclude = [] } = {
       // judged by what they contain (below), everything else by its name
       if (isSecretFileName(ent.name) && !WEB_CONTENT.test(ent.name)) {
         skipped.secrets.push(rel);
+        continue;
+      }
+      // never published, not even with force_include (see BACKUP_ARCHIVE_NAMES)
+      if (isBackupArchive(ent.name, ARCHIVE_EXT.test(ent.name) && BACKUP_WORD.test(ent.name) ? (await stat(abs)).size : 0)) {
+        skipped.backups.push(rel);
         continue;
       }
       if (userExcluded(rel, ent.name) && !forced(rel, ent.name)) {
@@ -406,6 +437,7 @@ export async function deploy({ da, progress = () => {} }, o) {
       other_files: local.skipped.soft.length + local.skipped.excluded.length,
       folders: local.skipped.dirs,
       symlinks: local.skipped.symlinks.length,
+      ...(local.skipped.backups.length ? { account_backups: local.skipped.backups.length } : {}),
     },
   };
 
@@ -442,6 +474,8 @@ export async function deploy({ da, progress = () => {} }, o) {
   const warnings = [];
   if (local.skipped.secrets.length) warnings.push(`Not uploaded because they look like secrets: ${local.skipped.secrets.slice(0, 8).join(', ')}.`);
   if (local.skipped.symlinks.length) warnings.push(`${local.skipped.symlinks.length} symbolic link(s) were skipped.`);
+  const backupNote = backupArchiveWarning(local.skipped);
+  if (backupNote) warnings.push(backupNote);
   if (!local.files.some((f) => /^index\.(html?|php)$/i.test(f.rel)) && !t.subfolder) warnings.push('There is no index.html or index.php at the top of this folder. Check that it really is the site\'s build output (for example dist or public) and not a parent folder.');
   if (existing.entries.length && !prev && mode === 'update') warnings.push('The web root already had files but no earlier connector deploy: existing files were kept and only overlaid, and no stale files were removed.');
 

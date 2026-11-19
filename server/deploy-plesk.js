@@ -10,7 +10,7 @@ import { lstat, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve, parse as parsePath } from 'node:path';
 import { readZip } from './zip.js';
-import { assertSafeLocalDir, buildArchives, collectFiles, stamp, staleFiles } from './deploy.js';
+import { assertSafeLocalDir, backupArchiveWarning, buildArchives, collectFiles, stamp, staleFiles } from './deploy.js';
 import { baseOf, dirOf } from './plesk-files.js';
 import { UserError } from './util.js';
 
@@ -158,6 +158,7 @@ export async function deployPlesk({ files, progress = () => {} }, o) {
       other_files: local.skipped.soft.length + local.skipped.excluded.length,
       folders: local.skipped.dirs,
       symlinks: local.skipped.symlinks.length,
+      ...(local.skipped.backups.length ? { account_backups: local.skipped.backups.length } : {}),
     },
   };
 
@@ -178,6 +179,8 @@ export async function deployPlesk({ files, progress = () => {} }, o) {
   const warnings = [];
   if (local.skipped.secrets.length) warnings.push(`Not uploaded because they look like secrets: ${local.skipped.secrets.slice(0, 8).join(', ')}. (A Node.js app takes its secrets from environment variables: node_env.)`);
   if (local.skipped.symlinks.length) warnings.push(`${local.skipped.symlinks.length} symbolic link(s) were skipped.`);
+  const backupNote = backupArchiveWarning(local.skipped);
+  if (backupNote) warnings.push(backupNote);
   if (!all.some((f) => /^(index\.(html?|php)|package\.json|app\.js|server\.js)$/i.test(f.rel)) && !t.subfolder) {
     warnings.push('There is no index.html, index.php or package.json at the top of this folder. Check that it really is the site\'s or app\'s folder and not a parent folder.');
   }

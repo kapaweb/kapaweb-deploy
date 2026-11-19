@@ -2,7 +2,7 @@
 // (https://kapaweb.gr/deploy-with-ai/playbook.md), so playbook text maps 1:1 to tools.
 import { createReadStream } from 'node:fs';
 import { mkdir, readFile, stat } from 'node:fs/promises';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip } from 'node:zlib';
@@ -41,6 +41,7 @@ import { pleskDbHandlers } from './tools-plesk-db.js';
 import { pleskFileTools, pleskSiteHandlers } from './tools-plesk-files.js';
 import { LIST_MAX, LIST_SORTS, LIST_TYPES, pageList } from './list-page.js';
 import { configDir } from './store.js';
+import { checkedDumpFile, createLocalTarget } from './local-guard.js';
 import { absentTlsApi, classicDryRun, classicIssue, classicStatus } from './ssl-classic.js';
 
 /** Shown in account_info: an AI app's own safety check (Claude Code auto mode) may block a write to the live hosting. */
@@ -131,16 +132,17 @@ const mb = (bytes) => Math.round((bytes / 1048576) * 10) / 10;
  * a dump the panel cut short (a crashed table, a dropped connection) is reported as incomplete.
  */
 async function exportDatabase(da, database, { folder, progress = () => {} } = {}) {
-  let dir;
+  const name = `db-${database}-${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}.sql.gz`;
+  let file;
   if (folder) {
-    if (!isAbsolute(folder)) throw new UserError('"folder" must be an absolute path on this computer.');
-    dir = resolve(folder);
+    // a folder the AI named is checked like every download target, as typed and as it really is
+    file = await createLocalTarget(folder, name);
   } else {
-    dir = join(configDir(), 'exports');
+    const dir = join(configDir(), 'exports');
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    if (!(await stat(dir)).isDirectory()) throw new UserError(`${dir} is not a folder.`);
+    file = join(dir, name);
   }
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  if (!(await stat(dir)).isDirectory()) throw new UserError(`${dir} is not a folder.`);
-  const file = join(dir, `db-${database}-${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}.sql.gz`);
   const started = Date.now();
   const r = await da.downloadToFile(`/api/db-manage/databases/${encodeURIComponent(database)}/export`, file, {
     gzip: true,
@@ -238,23 +240,31 @@ function accountDomains(cfg) {
 
 /**
  * A cron job runs by itself, for ever, with the account's rights, and survives a disconnect: so the command is limited to what a site really
- * needs: a PHP binary (or curl/wget fetching one https URL) with plain arguments and an optional output redirection. Chaining (; && |),
- * substitution ($( ) and backticks), other programs and writing to files through curl/wget are refused.
+ * needs: a PHP binary (or curl/wget fetching one https URL) with plain arguments, and output thrown away (>/dev/null, 2>&1). Chaining (; && |),
+ * substitution ($( ) and backticks), other programs, and writing to files are refused: a redirection into the home folder would let a
+ * fetched URL rewrite .ssh/authorized_keys, .bashrc or a web root's .htaccess every minute, and curl -O / wget without -O- save the
+ * fetched file into the home folder. Certificate checks stay on (no -k).
+ * NOTE (by design, see the 2026-11-18 review N-03): the PHP branch runs whatever script it is given, and a script can be written with
+ * write_file, so a cron job is code execution as the account. This check limits the command's syntax; the user's yes before cron_create
+ * is the real gate.
  */
 export function checkedCronCommand(command) {
-  const tail = /\s*(?:&?>>?\s*(?:\/dev\/null|\/home\/[A-Za-z0-9._\/-]+))?(?:\s*2>&1)?\s*$/;
+  const tail = /\s*(?:&?>>?\s*\/dev\/null)?(?:\s*2>(?:&1|\/dev\/null))?\s*$/;
   const body = command.replace(tail, '');
   if (/[;&|<>`$(){}\\\r\n]/.test(body)) {
-    throw new UserError('A cron command may not chain commands, pipe, redirect inside, or substitute (; & | < > ` $ ( ) { } \\). Use one command, with full paths: for example "/usr/local/php83/bin/php /home/<user>/domains/<domain>/public_html/wp-cron.php >/dev/null 2>&1".');
+    throw new UserError('A cron command may not chain commands, pipe, redirect into a file, or substitute (; & | < > ` $ ( ) { } \\); its output can only be thrown away with >/dev/null 2>&1. Use one command, with full paths: for example "/usr/local/php83/bin/php /home/<user>/domains/<domain>/public_html/wp-cron.php >/dev/null 2>&1".');
   }
-  const [program, ...rest] = body.trim().split(/\s+/);
+  const [program, ...rest] = body.trim().replace(/(^|\s)-O\s+-(?=\s|$)/g, '$1-O-').split(/\s+/);
   if (/^\/usr\/(local\/php[0-9.]+\/bin|local\/bin|bin)\/php[0-9.]*(-cli)?$/.test(program)) return;
-  if (/^\/usr\/(local\/)?bin\/(curl|wget)$/.test(program)) {
-    const urls = rest.filter((a) => /^https?:\/\/[^\s'"]+$/.test(a));
+  const tool = /^\/usr\/(local\/)?bin\/(curl|wget)$/.exec(program)?.[2];
+  if (tool) {
+    const urls = rest.filter((a) => /^https:\/\/[^\s'"]+$/.test(a));
     const flags = rest.filter((a) => !urls.includes(a));
-    const okFlags = flags.every((a) => /^(-[sSLqfk46]+|--silent|--quiet|-O-?|-qO-?|-)$/.test(a));
-    if (urls.length === 1 && okFlags) return;
-    throw new UserError('curl/wget in a cron job may only fetch ONE https URL with plain flags (-s -S -L -q -f -k -4 -6, or -O - to print): writing files, uploading or sending data is refused.');
+    // curl prints to stdout by itself (-O would save under the remote name); wget saves a file unless -O- sends it to stdout
+    const okFlag = tool === 'curl' ? (a) => /^(-[sSLf46]+|--silent|--show-error|--location|--fail)$/.test(a) : (a) => /^(-[q46]+|--quiet|-O-|-qO-)$/.test(a);
+    const toStdout = tool === 'curl' || flags.some((a) => a === '-O-' || a === '-qO-');
+    if (urls.length === 1 && flags.every(okFlag) && toStdout) return;
+    throw new UserError(`${tool} in a cron job may only fetch ONE https:// URL with plain flags (curl: -s -S -L -f -4 -6; wget: -q -4 -6 and -O- to print), output thrown away with >/dev/null 2>&1. http://, -k (no certificate check), saving files (curl -O, wget without -O-), uploading or sending data are refused.`);
   }
   throw new UserError('A cron command must start with a PHP binary by its full path (for example /usr/local/php83/bin/php; php_versions shows the ones installed) or fetch one https URL with /usr/bin/curl or /usr/bin/wget. Other programs are not started by cron jobs made through the connector.');
 }
@@ -1184,8 +1194,9 @@ export function buildTools() {
       if (clean && !optBool(args, 'confirm_clean', false)) {
         throw new UserError('clean:true empties the database first and destroys its current data. Ask the user; only after they agree call again with confirm_clean:true (the connector then saves an export of the current data first).');
       }
-      const file = resolve(reqString(args, 'file'));
-      if (!/\.sql(\.gz)?$/i.test(file)) throw new UserError('The dump must be a .sql or .sql.gz file.');
+      if (!/\.sql(\.gz)?$/i.test(resolve(reqString(args, 'file')))) throw new UserError('The dump must be a .sql or .sql.gz file.');
+      // like every file that leaves this computer: not from hidden, system or other people's folders, nor another account's export
+      const file = await checkedDumpFile(reqString(args, 'file'), database);
       const st = await stat(file).catch(() => null);
       if (!st || !st.isFile()) throw new UserError(`The file ${file} does not exist.`);
       if (st.size === 0) throw new UserError(`${basename(file)} is empty.`);
@@ -1432,7 +1443,7 @@ export function buildTools() {
   add({
     name: 'cron_create',
     title: 'Create a cron job',
-    description: 'Creates a cron job. Only for jobs the user asked for. The command must start with the versioned PHP binary of the site by its full path (e.g. /usr/local/php83/bin/php), or fetch one https URL with /usr/bin/curl or /usr/bin/wget; no chaining, pipes or substitution. Output goes to /dev/null or a log file in the account. Prefer every 5-15 minutes.',
+    description: 'Creates a cron job. Only for jobs the user asked for. The command must start with the versioned PHP binary of the site by its full path (e.g. /usr/local/php83/bin/php), or fetch one https:// URL with /usr/bin/curl or /usr/bin/wget (wget with -O-); no chaining, pipes, substitution or writing to files. Output can only be thrown away (>/dev/null 2>&1). Prefer every 5-15 minutes.',
     inputSchema: schema(
       { minute: S('Cron field, e.g. "*/10".'), hour: S('Cron field.'), dayofmonth: S('Cron field.'), month: S('Cron field.'), dayofweek: S('Cron field.'), command: S('The command line (single line).') },
       ['minute', 'hour', 'dayofmonth', 'month', 'dayofweek', 'command'],
@@ -1555,16 +1566,17 @@ export function buildTools() {
   add({
     name: 'backup_upload',
     title: 'Carry a backup from this computer into the account\'s backups',
-    description: 'Puts a DirectAdmin backup file that is on THIS computer (for example one made on another server, or kept earlier) into /backups of the account, so that backup_restore can use it. Only adds a file: nothing is restored and an existing backup is never replaced. The panel must be able to read the file as a backup (it is checked, and removed again if not). The file must be a .tar.gz or .tar.zst, in an allowed folder of this computer (the project folder). Afterwards backup_list file=<name> shows what it holds.',
+    description: 'Puts a DirectAdmin backup file that is on THIS computer (for example one made on another server, or kept earlier) into /backups of the account, so that backup_restore can use it. Only adds a file: nothing is restored and an existing backup is never replaced. The panel must be able to read the file as a backup (it is checked, and removed again if not). The file must be a .tar.gz or .tar.zst, in an allowed folder of this computer (for example a backups folder next to the project), and a backup of THIS account (a backup that names another account is refused). A file in /backups can then be restored over the account: tell the user which file goes into which account, get a clear yes, then call with confirm:true. Afterwards backup_list file=<name> shows what it holds.',
     inputSchema: schema(
       {
         source: S('Absolute path of the backup file on this computer.'),
         name: S('Name to give it in /backups (default: the file name). Letters, digits, dot, dash, underscore, ending in .tar.gz or .tar.zst.'),
+        confirm: B('Must be true, after the user agreed.'),
         domain: S('The account\'s main domain (default: detected).'),
       },
-      ['source'],
+      ['source', 'confirm'],
     ),
-    annotations: WRITE_ONCE,
+    annotations: DESTRUCTIVE, // what it puts into /backups is what backup_restore restores over the account
     exclusive: true,
     async handler(args, ctx) {
       notPlesk(ctx.session);
@@ -1579,7 +1591,7 @@ export function buildTools() {
     inputSchema: schema(
       {
         file: S('Backup file name from backup_list.'),
-        folder: S('Absolute path of the folder on this computer (the project folder).'),
+        folder: S('Absolute path of a folder on this computer OUTSIDE the folder that is deployed (for example a backups folder next to the project), never the site\'s build or deploy folder.'),
         confirm: B('Must be true, after the user agreed.'),
         domain: S('The account\'s main domain (default: detected).'),
       },

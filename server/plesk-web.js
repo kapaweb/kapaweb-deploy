@@ -15,7 +15,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { isIP } from 'node:net';
 import { connectTarget } from './da.js';
-import { UserError, VERSION, redactor } from './util.js';
+import { UserError, VERSION, clearStalePart, redactor } from './util.js';
 import { PleskError } from './plesk.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -126,16 +126,24 @@ export class PleskWeb {
     };
     if (t.https) options.servername = t.servername;
     const part = saveTo ? `${saveTo}.part` : null;
-    return new Promise((resolve, reject) => {
+    let created = false;
+    // "<file>.part" is created new ('wx', never an existing file or a symbolic link): in a shared folder another user could otherwise
+    // have planted it to receive the download. A leftover of an earlier download of our own is removed first.
+    const ready = part ? clearStalePart(part) : Promise.resolve();
+    return ready.then(() => new Promise((resolve, reject) => {
       const req = lib.request(options, (res) => {
         const type = String(res.headers['content-type'] || '');
         if (saveTo && res.statusCode === 200 && !/json|text\/html/i.test(type)) {
           // a file: straight to disk
-          const out = createWriteStream(part, { mode: 0o600 });
+          const out = createWriteStream(part, { flags: 'wx', mode: 0o600 });
+          out.once('open', () => (created = true));
           let bytes = 0;
           res.on('data', (c) => (bytes += c.length));
           res.on('error', (e) => out.destroy(e));
-          out.on('error', reject);
+          out.on('error', (e) => {
+            req.destroy(); // nothing more is read once the file cannot be written
+            reject(e);
+          });
           out.on('finish', () => resolve({ status: 200, headers: res.headers, saved: bytes, buffer: Buffer.alloc(0), text: '' }));
           res.pipe(out);
           return;
@@ -170,7 +178,7 @@ export class PleskWeb {
         return res;
       },
       async (err) => {
-        if (part) await rm(part, { force: true }).catch(() => {});
+        if (part && created) await rm(part, { force: true }).catch(() => {}); // only our own: created above with 'wx'
         throw err;
       },
     ).catch((err) => {
@@ -180,9 +188,10 @@ export class PleskWeb {
       if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/i.test(String(code))) {
         throw new UserError('Plesk presented a certificate that could not be verified, so the connection was refused for safety. Check the panel address.');
       }
+      if (code === 'EEXIST') throw new UserError(`${part} appeared while the download started, so nothing was downloaded. Choose a folder of your own, not a shared one such as /tmp.`);
       if (code === 'ENOENT' || code === 'EACCES') throw new UserError(`Could not read or write the local file (${code}).`);
       throw new UserError(`Could not reach Plesk (${code || err?.message || 'network error'}). Check the internet connection.`);
-    });
+    }));
   }
 
   #remember(res) {

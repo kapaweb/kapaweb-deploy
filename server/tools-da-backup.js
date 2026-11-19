@@ -12,11 +12,13 @@
 //   delete   POST /api/filemanager-actions/remove (trash)            -> takes one backup file away again
 // Create and restore only QUEUE the job (DirectAdmin's task queue runs it within about a minute): a backup is proven by its name
 // appearing in the list, a restore has no completion signal in the panel's API, so the result says "queued" and the caller checks the site.
-import { basename, isAbsolute, resolve } from 'node:path';
-import { mkdir, open, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { basename } from 'node:path';
+import { open, readFile, rm, stat } from 'node:fs/promises';
+import zlib from 'node:zlib';
 import { UserError, limitOrZero } from './util.js';
 import { fmDiskUsage, fmList, fmMkdir, fmRemove, fmUpload, isNotFound } from './fm.js';
-import { assertLocalFileAllowed } from './local-guard.js';
+import { assertLocalFileAllowed, checkLocalTarget, createLocalTarget, realLocalSource } from './local-guard.js';
 
 const CMD = '/CMD_SITE_BACKUP';
 /** Every part of an account the panel can back up (the checkboxes of its "Create Backup" form). */
@@ -44,6 +46,114 @@ const UPLOAD_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.tar\.(gz|zst)$/i;
 const MAGIC = { gz: Buffer.from([0x1f, 0x8b]), zst: Buffer.from([0x28, 0xb5, 0x2f, 0xfd]) };
 const MB = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${Math.round((n / 1048576) * 10) / 10} MB`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- whose backup is it? (backup/user.conf inside the tar: "username=<account>") ----
+const OWNER_SCAN_BYTES = 64 * 1048576; // of unpacked data: the account files come first in a DirectAdmin backup; past this, "cannot tell"
+
+/** A tar header's number field: octal text, or GNU base-256 for big sizes. */
+function tarNumber(field) {
+  if (field[0] & 0x80) {
+    let n = 0;
+    for (let i = 1; i < field.length; i++) n = n * 256 + field[i];
+    return n;
+  }
+  const s = field.toString('latin1').replace(/\0[\s\S]*$/, '').trim();
+  return s ? parseInt(s, 8) : 0;
+}
+const cString = (b) => b.toString('utf8').replace(/\0[\s\S]*$/, '');
+
+/** Reads tar entries from pushed chunks until backup/user.conf has been read. `result`: the username, null (not there / no name), undefined (still looking). */
+export class TarOwnerScan {
+  constructor() {
+    this.buf = Buffer.alloc(0);
+    this.left = 0; // bytes of the current entry (data + padding) still to pass
+    this.dataLeft = 0; // of which data
+    this.capture = null; // { kind: 'longname' | 'userconf', parts: [], size }
+    this.longName = null;
+    this.result = undefined;
+  }
+
+  push(chunk) {
+    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    while (this.result === undefined) {
+      if (this.left === 0) {
+        if (this.buf.length < 512) return;
+        const h = this.buf.subarray(0, 512);
+        this.buf = this.buf.subarray(512);
+        if (h.every((b) => b === 0)) {
+          this.result = null; // end of the archive
+          return;
+        }
+        const ustar = h.subarray(257, 262).toString('latin1') === 'ustar';
+        const prefix = ustar ? cString(h.subarray(345, 500)) : '';
+        const name = (this.longName ?? (prefix ? `${prefix}/${cString(h.subarray(0, 100))}` : cString(h.subarray(0, 100)))).replace(/^\.\//, '');
+        this.longName = null;
+        const size = tarNumber(h.subarray(124, 136));
+        const type = String.fromCharCode(h[156] || 48);
+        this.dataLeft = size;
+        this.left = size + ((512 - (size % 512)) % 512);
+        if (type === 'L') this.capture = { kind: 'longname', parts: [], size: 0 };
+        else if ((type === '0' || type === '\0') && /(^|\/)backup\/user\.conf$/.test(name)) this.capture = { kind: 'userconf', parts: [], size: 0 };
+        else this.capture = null;
+        if (this.left === 0) this.#done();
+        continue;
+      }
+      if (this.buf.length === 0) return;
+      const n = Math.min(this.left, this.buf.length);
+      const data = Math.min(n, this.dataLeft);
+      if (this.capture && data > 0 && this.capture.size < 65536) {
+        this.capture.parts.push(this.buf.subarray(0, data));
+        this.capture.size += data;
+      }
+      this.dataLeft -= data;
+      this.left -= n;
+      this.buf = this.buf.subarray(n);
+      if (this.left === 0) this.#done();
+    }
+  }
+
+  #done() {
+    const c = this.capture;
+    this.capture = null;
+    if (!c) return;
+    const text = Buffer.concat(c.parts).toString('utf8');
+    if (c.kind === 'longname') this.longName = text.replace(/\0[\s\S]*$/, '');
+    else this.result = /^username=([A-Za-z0-9_.-]{1,64})\s*$/m.exec(text)?.[1] ?? null;
+  }
+}
+
+/**
+ * The DirectAdmin account a backup belongs to, from its backup/user.conf, or null when that cannot be told cheaply (not found in the
+ * first part of the archive, a damaged file, or no zstd support in this Node.js). Never throws.
+ */
+export function backupOwner(file, ext, { maxBytes = OWNER_SCAN_BYTES } = {}) {
+  const make = ext === 'gz' ? zlib.createGunzip : typeof zlib.createZstdDecompress === 'function' ? zlib.createZstdDecompress : null;
+  if (!make) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const scan = new TarOwnerScan();
+    const src = createReadStream(file);
+    const unpack = make();
+    let seen = 0;
+    let finished = false;
+    const finish = (v) => {
+      if (finished) return;
+      finished = true;
+      src.destroy();
+      unpack.destroy();
+      resolve(v ?? null);
+    };
+    unpack.on('data', (chunk) => {
+      seen += chunk.length;
+      scan.push(chunk);
+      if (scan.result !== undefined) finish(scan.result);
+      else if (seen > maxBytes) finish(null);
+    });
+    unpack.on('end', () => finish(scan.result));
+    unpack.on('error', () => finish(null));
+    src.on('error', () => finish(null));
+    src.pipe(unpack);
+  });
+}
 
 const names = (body) => (Array.isArray(body) ? body.filter((x) => typeof x === 'string') : null);
 // a backup list comes from the panel (a hacked site can create files in /backups): only plain backup names are shown or used
@@ -198,11 +308,11 @@ export function daBackupOps(h) {
    */
   async function upload(args, { session, progress = () => {} }) {
     const source = reqString(args, 'source', { max: 1000 });
-    if (!isAbsolute(source)) throw new UserError('"source" must be an absolute path on this computer.');
-    const local = await realpath(resolve(source)).catch(() => resolve(source));
+    const { typed, real: local } = await realLocalSource(source);
     const st = await stat(local).catch(() => null);
     if (!st || !st.isFile()) throw new UserError(`The file ${local} does not exist.`);
     assertLocalFileAllowed(local);
+    assertLocalFileAllowed(typed);
     const name = optString(args, 'name', { max: 130 }) || basename(local);
     const m = UPLOAD_NAME_RE.exec(name);
     if (!m) throw new UserError(`"${name}" is not a usable backup name: letters, digits, dot, dash and underscore only, ending in .tar.gz or .tar.zst. Pass name=<new name> to give the file a name like that.`);
@@ -216,6 +326,17 @@ export function daBackupOps(h) {
     }
     if (!head.subarray(0, MAGIC[ext].length).equals(MAGIC[ext])) throw new UserError(`${basename(local)} does not look like a .tar.${ext} archive (its first bytes are not those of a ${ext === 'gz' ? 'gzip' : 'zstd'} file). Nothing was uploaded.`);
     if (st.size < 1024) throw new UserError(`${basename(local)} is only ${st.size} bytes: that cannot be a backup. Nothing was uploaded.`);
+    // A file in /backups is what backup_restore trusts: putting one there is the first half of a restore, so it needs the user's yes too.
+    if (args.confirm !== true) {
+      throw new UserError('A backup in /backups can then be restored over this account (e-mail accounts, forwarders, databases, website files). Tell the user which file from this computer goes into which account; only after their clear yes call again with confirm:true.');
+    }
+    // A DirectAdmin backup names its account in backup/user.conf: a backup of ANOTHER account is not carried in (a restore of it would
+    // put that account's mail and data here). Read cheaply from the start of the archive; when it cannot be told, the confirm above is the check.
+    const owner = await backupOwner(local, ext);
+    const me = String((await session.username()) || '').toLowerCase();
+    if (owner && me && owner.toLowerCase() !== me) {
+      throw new UserError(`${basename(local)} is a backup of the DirectAdmin account "${owner}", not of ${me}. A backup of another account is not carried into this one through the connector (a restore would put that account's mail and data here). For a move between accounts, ask kapaweb support for an administrator restore. Nothing was uploaded.`);
+    }
     const da = await session.da();
     const domain = await mainDomain(args, da);
     if (await backupEntry(da, name) || (await listNames(da, domain)).includes(name)) {
@@ -282,16 +403,15 @@ export function daBackupOps(h) {
       throw new UserError('A backup holds the whole account: website files, e-mail messages and database contents. Tell the user which backup goes to which folder of this computer; only after their clear yes call again with confirm:true.');
     }
     const folder = reqString(args, 'folder', { max: 1000 });
-    if (!isAbsolute(folder)) throw new UserError('"folder" must be an absolute path on this computer.');
-    const target = resolve(folder, file);
-    assertLocalFileAllowed(target);
-    if (await stat(target).catch(() => null)) throw new UserError(`${target} already exists on this computer; it is not replaced. Choose another folder.`);
+    // checked as typed AND as it really is (an alias of a refused folder is that folder)
+    const planned = await checkLocalTarget(folder, file);
+    if (await stat(planned).catch(() => null)) throw new UserError(`${planned} already exists on this computer; it is not replaced. Choose another folder.`);
     const da = await session.da();
     const domain = await mainDomain(args, da);
     if (!(await listNames(da, domain)).includes(file)) throw new UserError(`${file} is not one of this account's backups (backup_list shows them).`);
     const entry = await backupEntry(da, file);
     if (!entry) throw new UserError(`${file} is not a regular file in /backups of this account.`);
-    await mkdir(resolve(folder), { recursive: true, mode: 0o700 });
+    const target = await createLocalTarget(folder, file);
     progress(`Downloading ${file} (${MB(entry.size)})…`);
     const r = await da.downloadToFile(`/api/filemanager/download?` + new URLSearchParams({ path: `${BACKUPS_DIR}/${file}` }), target, {
       onProgress: (n) => progress(`Downloading ${file}: ${MB(n)} of ${MB(entry.size)}`),
@@ -300,7 +420,11 @@ export function daBackupOps(h) {
       await rm(target, { force: true });
       throw new UserError(`The download of ${file} came to ${r.storedBytes} bytes, the panel lists ${entry.size}. It was removed; try again.`);
     }
-    return { saved_as: target, bytes: entry.size, note: 'The file holds the whole account (mail and database contents too): keep it in the project folder, and move it to the Trash when it is no longer needed.' };
+    return {
+      saved_as: target,
+      bytes: entry.size,
+      note: 'The file holds the whole account (mail and database contents too). Keep it OUTSIDE the folder that is deployed (for example a backups folder next to the project), never in the site\'s build or deploy folder, and move it to the Trash when it is no longer needed. deploy leaves such archives out on purpose and says so.',
+    };
   }
 
   /** Takes one backup file out of /backups. It goes to the account's trash (File Manager), so it can be brought back. */

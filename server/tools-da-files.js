@@ -4,11 +4,11 @@
 //
 // Where it differs from Plesk: a zip is made in /tmp/kw-archives, never next to the files (a web root is public), and an older panel
 // (DirectAdmin 1.668) cannot make a zip at all, so there a FOLDER is downloaded file by file instead.
-import { basename, isAbsolute, resolve } from 'node:path';
-import { mkdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
+import { basename, resolve } from 'node:path';
+import { lstat, mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { archiveExt, fmChmod, fmCreateArchive, fmExtract, fmList, fmMkdir, fmUpload, isNotFound } from './fm.js';
 import { assertNotInternal, assertNotWebRootTarget, assertReadable, assertWritable, docrootInfo, isSecretFileName, isUnreadableName, join, normPath } from './paths.js';
-import { assertLocalFileAllowed, checkedMode } from './local-guard.js';
+import { assertLocalFileAllowed, checkLocalTarget, checkedMode, createLocalTarget, realLocalSource } from './local-guard.js';
 import { looksSecret } from './deploy.js';
 import { UserError } from './util.js';
 
@@ -95,11 +95,11 @@ export function daFileOps(h) {
 
   async function upload(args, { session, progress = () => {} }) {
     const source = reqString(args, 'source', { max: 1000 });
-    if (!isAbsolute(source)) throw new UserError('"source" must be an absolute path on this computer.');
-    const local = await realpath(resolve(source)).catch(() => resolve(source));
+    const { typed, real: local } = await realLocalSource(source);
     const st = await stat(local).catch(() => null);
     if (!st || !st.isFile()) throw new UserError(`The file ${local} does not exist.`);
     assertLocalFileAllowed(local);
+    assertLocalFileAllowed(typed); // as typed too: a link inside a refused folder is not sent either
     const name = optString(args, 'name', { max: 255 }) || basename(local);
     if (name.includes('/')) throw new UserError('"name" is a file name, not a path: the folder goes in "folder".');
     if ([name, basename(local)].some((n) => isSecretFileName(n) || isUnreadableName(n))) throw new UserError(`${name === basename(local) ? name : `${basename(local)} (uploaded as ${name})`} is a secret or data file: it is not uploaded through the connector.`);
@@ -155,6 +155,11 @@ export function daFileOps(h) {
     await mkdir(target, { recursive: true, mode: 0o700 });
     const { entries } = await fmList(da, path);
     for (const e of entries) {
+      // a name from the panel's listing is a single path segment, or it is left out (it must not lead outside the folder on this computer)
+      if (typeof e.name !== 'string' || !e.name || /[\\/]/.test(e.name) || /^\.+$/.test(e.name)) {
+        state.left_out.push(`${path}/${String(e.name)}`);
+        continue;
+      }
       const child = join(path, e.name);
       const local = resolve(target, e.name);
       if (e.type === 'link' || isUnreadableName(e.name) || e.name.startsWith('.')) {
@@ -179,23 +184,24 @@ export function daFileOps(h) {
     if (isUnreadableName(name)) throw new UserError(`${name} is a secret or data file and is not downloadable through the connector.`);
     if (name.startsWith('.')) throw new UserError('A file whose name starts with a dot is not downloaded (it could be a settings file).');
     const folder = reqString(args, 'folder', { max: 1000 });
-    if (!isAbsolute(folder)) throw new UserError('"folder" must be an absolute path on this computer.');
-    const target = resolve(folder, name);
-    assertLocalFileAllowed(target);
-    if (await stat(target).catch(() => null)) throw new UserError(`${target} already exists on this computer; it is not replaced. Choose another folder.`);
-    await mkdir(resolve(folder), { recursive: true, mode: 0o700 });
+    // checked as typed AND as it really is (an alias such as /Volumes/<disk>/Users/<me>/Library/LaunchAgents is the refused folder itself)
+    const planned = await checkLocalTarget(folder, name);
+    if (await stat(planned).catch(() => null)) throw new UserError(`${planned} already exists on this computer; it is not replaced. Choose another folder.`);
+    const target = await createLocalTarget(folder, name);
     const da = await session.da();
     const entry = await entryOf(da, path);
     if (!entry) throw new UserError(`${path} does not exist.`);
     if (entry.type === 'dir') {
       const state = { files: 0, bytes: 0, left_out: [] };
       const part = `${target}.part`;
-      await rm(part, { recursive: true, force: true });
+      // never removed or reused when it is already there: it could be someone's folder, or a link
+      if (await lstat(part).catch(() => null)) throw new UserError(`${part} already exists on this computer, so nothing was downloaded. Remove it or choose another folder.`);
+      await mkdir(part, { mode: 0o700 });
       try {
         await downloadTree(da, path, part, progress, state);
         await rename(part, target);
       } catch (err) {
-        await rm(part, { recursive: true, force: true });
+        await rm(part, { recursive: true, force: true }); // ours: created just above
         throw err;
       }
       return { saved_as: target, files: state.files, bytes: state.bytes, ...(state.left_out.length ? { left_out: state.left_out.slice(0, 30), left_out_count: state.left_out.length } : {}), note: 'Secret files, files starting with a dot and symlinks are not downloaded.' };

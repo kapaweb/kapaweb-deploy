@@ -2,11 +2,11 @@
 // They work on the subscription's own file space, the way Plesk's File Manager shows it (/httpdocs is the web root, /private is for
 // files that must not be public, /logs holds the logs). The same safety rules as the DirectAdmin tools apply: secret files are not
 // readable, secrets never enter a web root, nothing is made world-writable, the web root itself is not deleted.
-import { isAbsolute, resolve, basename } from 'node:path';
-import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { basename } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
 import { pleskContext } from './tools-plesk-db.js';
 import { baseOf, dirOf, pleskPath } from './plesk-files.js';
-import { assertLocalFileAllowed, checkedMode } from './local-guard.js';
+import { assertLocalFileAllowed, checkLocalTarget, checkedMode, createLocalTarget, realLocalSource } from './local-guard.js';
 import { daFileOps } from './tools-da-files.js';
 import { LIST_MAX, LIST_SORTS, LIST_TYPES, pageList } from './list-page.js';
 import { UserError } from './util.js';
@@ -368,11 +368,11 @@ export function pleskFileTools(h) {
         const { session, progress = () => {} } = ctx;
         if (session.panel !== 'plesk') return dafiles.upload(args, ctx);
         const source = reqString(args, 'source', { max: 1000 });
-        if (!isAbsolute(source)) throw new UserError('"source" must be an absolute path on this computer.');
-        const local = await realpath(resolve(source)).catch(() => resolve(source));
+        const { typed, real: local } = await realLocalSource(source);
         const st = await stat(local).catch(() => null);
         if (!st || !st.isFile()) throw new UserError(`The file ${local} does not exist.`);
         assertLocalFileAllowed(local);
+        assertLocalFileAllowed(typed); // as typed too: a link inside a refused folder is not sent either
         const name = optString(args, 'name', { max: 255 }) || basename(local);
         if ([name, basename(local)].some((n) => isSecretFileName(n) || isUnreadableName(n))) throw new UserError(`${name === basename(local) ? name : `${basename(local)} (uploaded as ${name})`} is a secret or data file: it is not uploaded through the connector.`);
         if (st.size <= 1024 * 1024 && looksSecret((await readFile(local)).toString('latin1'))) {
@@ -403,11 +403,10 @@ export function pleskFileTools(h) {
         if (isUnreadableName(name)) throw new UserError(`${name} is a secret or data file and is not downloadable through the connector.`);
         if (name.startsWith('.')) throw new UserError('A file whose name starts with a dot is not downloaded (it could be a settings file of this computer).');
         const folder = reqString(args, 'folder', { max: 1000 });
-        if (!isAbsolute(folder)) throw new UserError('"folder" must be an absolute path on this computer.');
-        assertLocalFileAllowed(resolve(folder, name));
-        const target = resolve(folder, name);
-        if (await stat(target).catch(() => null)) throw new UserError(`${target} already exists on this computer; it is not replaced. Choose another folder.`);
-        await mkdir(resolve(folder), { recursive: true, mode: 0o700 });
+        // checked as typed AND as it really is (an alias such as /Volumes/<disk>/Users/<me>/Library/LaunchAgents is the refused folder itself)
+        const planned = await checkLocalTarget(folder, name);
+        if (await stat(planned).catch(() => null)) throw new UserError(`${planned} already exists on this computer; it is not replaced. Choose another folder.`);
+        const target = await createLocalTarget(folder, name);
         const { files } = await pleskContext(session, domainOf(args));
         progress(`Downloading ${name}…`);
         const r = await files.downloadTo(path, target);
