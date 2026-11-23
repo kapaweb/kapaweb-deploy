@@ -39,6 +39,7 @@ import { pleskTools } from './tools-plesk.js';
 import { BACKUP_SECTIONS, daBackupOps } from './tools-da-backup.js';
 import { pleskDbHandlers } from './tools-plesk-db.js';
 import { pleskFileTools, pleskSiteHandlers } from './tools-plesk-files.js';
+import { trashTools } from './tools-trash.js';
 import { LIST_MAX, LIST_SORTS, LIST_TYPES, pageList } from './list-page.js';
 import { configDir } from './store.js';
 import { checkedDumpFile, createLocalTarget } from './local-guard.js';
@@ -1628,6 +1629,7 @@ export function buildTools() {
   // ---- Plesk-only tools (the panel's Node.js extension): they answer "not a Plesk account" for DirectAdmin accounts ----
   for (const def of pleskTools(pleskHelpers)) add(def);
   for (const def of pleskFileTools(pleskHelpers)) add(def);
+  for (const def of trashTools(pleskHelpers)) add(def); // trash_list / trash_empty: both panels
 
   return tools;
 }
